@@ -18,7 +18,7 @@ enum LightState: String, Codable, CaseIterable {
 
     var menuSymbol: String {
         switch self {
-        case .running: "circle.dotted"
+        case .running: "circle.fill"
         case .waiting: "circle.fill"
         case .done: "circle.fill"
         case .error: "circle.fill"
@@ -27,12 +27,14 @@ enum LightState: String, Codable, CaseIterable {
 
     var color: Color {
         switch self {
-        case .running: .secondary
+        case .running: .blue
         case .waiting: .yellow
         case .done: .green
         case .error: .red
         }
     }
+
+    var blinks: Bool { self == .running }
 }
 
 struct SessionState: Codable, Identifiable, Equatable {
@@ -120,24 +122,43 @@ struct TrafficLightView: View {
     let activeState: LightState
 
     var body: some View {
-        VStack(spacing: 10) {
-            lamp(.error, color: .red)
-            lamp(.waiting, color: .yellow)
-            lamp(.done, color: .green)
-        }
-        .padding(12)
-        .background(.black.opacity(0.88), in: RoundedRectangle(cornerRadius: 22))
-        .overlay {
-            RoundedRectangle(cornerRadius: 22)
-                .stroke(.white.opacity(0.14), lineWidth: 1)
+        TimelineView(.periodic(from: .now, by: 0.55)) { context in
+            let runningOn = Int(context.date.timeIntervalSinceReferenceDate / 0.55).isMultiple(of: 2)
+            VStack(spacing: 10) {
+                lamp(.error, color: .red, illuminated: activeState == .error)
+                lamp(.waiting, color: .yellow, illuminated: activeState == .waiting)
+                lamp(.done, color: .green, illuminated: activeState == .done)
+                lamp(.running, color: .blue, illuminated: activeState == .running && runningOn)
+            }
+            .padding(12)
+            .background(.black.opacity(0.88), in: RoundedRectangle(cornerRadius: 22))
+            .overlay {
+                RoundedRectangle(cornerRadius: 22)
+                    .stroke(.white.opacity(0.14), lineWidth: 1)
+            }
         }
     }
 
-    private func lamp(_ state: LightState, color: Color) -> some View {
+    private func lamp(_ state: LightState, color: Color, illuminated: Bool) -> some View {
         Circle()
-            .fill(activeState == state ? color : color.opacity(0.14))
+            .fill(illuminated ? color : color.opacity(0.14))
             .frame(width: 42, height: 42)
-            .shadow(color: activeState == state ? color.opacity(0.9) : .clear, radius: 10)
+            .shadow(color: illuminated ? color.opacity(0.9) : .clear, radius: 10)
+    }
+}
+
+struct MenuStatusIcon: View {
+    let state: LightState
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 0.55)) { context in
+            let visible = !state.blinks
+                || Int(context.date.timeIntervalSinceReferenceDate / 0.55).isMultiple(of: 2)
+            Image(systemName: state.menuSymbol)
+                .symbolRenderingMode(.palette)
+                .foregroundStyle(state.color)
+                .opacity(visible ? 1 : 0.2)
+        }
     }
 }
 
@@ -213,9 +234,7 @@ struct CodexStatusLightApp: App {
             MenuStatusView(store: store)
         } label: {
             let state = store.primary?.state ?? .running
-            Image(systemName: state.menuSymbol)
-                .symbolRenderingMode(.palette)
-                .foregroundStyle(state.color)
+            MenuStatusIcon(state: state)
         }
 
         Window("Codex Status Light", id: "status-light") {

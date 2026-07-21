@@ -4,6 +4,15 @@ import Testing
 
 @Suite @MainActor
 struct StatusStoreTests {
+    @Test func runningUsesBlinkingFilledIndicator() {
+        #expect(LightState.allCases.count == 4)
+        #expect(LightState.running.blinks)
+        #expect(LightState.running.menuSymbol == "circle.fill")
+        #expect(!LightState.error.blinks)
+        #expect(!LightState.waiting.blinks)
+        #expect(!LightState.done.blinks)
+    }
+
     @Test func errorHasPriorityOverNewerDoneState() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)

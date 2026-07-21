@@ -4,10 +4,10 @@ A macOS menu-bar and floating traffic light for Codex task state.
 
 | Light | Meaning |
 |---|---|
-| Green | The turn completed |
-| Yellow | Codex needs input or approval |
 | Red | A tool failed or the task was marked blocked |
-| Dim | Codex is running or no active task exists |
+| Yellow | Codex needs input or approval |
+| Green | The turn completed |
+| Blinking blue | Codex is running normally |
 
 ## Build and run
 
