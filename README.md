@@ -24,7 +24,8 @@ open "$HOME/Applications/Codex Status Light.app"
 ```
 
 Open the menu-bar item and choose **Show floating light** to keep the panel above
-other windows.
+other windows after closing it. The floating light opens automatically when the
+app launches.
 
 ## Install Codex integration
 

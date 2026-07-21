@@ -4,13 +4,9 @@ import Testing
 
 @Suite @MainActor
 struct StatusStoreTests {
-    @Test func runningUsesBlinkingFilledIndicator() {
+    @Test func everyStateUsesStableFilledMenuIndicator() {
         #expect(LightState.allCases.count == 4)
-        #expect(LightState.running.blinks)
-        #expect(LightState.running.menuSymbol == "circle.fill")
-        #expect(!LightState.error.blinks)
-        #expect(!LightState.waiting.blinks)
-        #expect(!LightState.done.blinks)
+        #expect(LightState.allCases.allSatisfy { $0.menuSymbol == "circle.fill" })
     }
 
     @Test func errorHasPriorityOverNewerDoneState() throws {

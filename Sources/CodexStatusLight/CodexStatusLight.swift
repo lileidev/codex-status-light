@@ -34,7 +34,6 @@ enum LightState: String, Codable, CaseIterable {
         }
     }
 
-    var blinks: Bool { self == .running }
 }
 
 struct SessionState: Codable, Identifiable, Equatable {
@@ -151,14 +150,9 @@ struct MenuStatusIcon: View {
     let state: LightState
 
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 0.55)) { context in
-            let visible = !state.blinks
-                || Int(context.date.timeIntervalSinceReferenceDate / 0.55).isMultiple(of: 2)
-            Image(systemName: state.menuSymbol)
-                .symbolRenderingMode(.palette)
-                .foregroundStyle(state.color)
-                .opacity(visible ? 1 : 0.2)
-        }
+        Image(systemName: state.menuSymbol)
+            .symbolRenderingMode(.palette)
+            .foregroundStyle(state.color)
     }
 }
 
@@ -218,35 +212,70 @@ struct FloatingWindowAccessor: NSViewRepresentable {
     func updateNSView(_ nsView: NSView, context: Context) {}
 }
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    let store = StatusStore()
+    private var statusWindow: NSPanel?
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            self?.showWindow()
+        }
+    }
+
+    func showWindow() {
+        if statusWindow == nil {
+            let window = NSPanel(
+                contentRect: NSRect(x: 0, y: 0, width: 430, height: 220),
+                styleMask: [.titled, .closable, .nonactivatingPanel],
+                backing: .buffered,
+                defer: false
+            )
+            window.title = "Codex Status Light"
+            window.contentView = NSHostingView(rootView: StatusContentView(store: store))
+            window.level = .floating
+            window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+            window.isFloatingPanel = true
+            window.hidesOnDeactivate = false
+            window.becomesKeyOnlyIfNeeded = true
+            window.isReleasedWhenClosed = false
+            let targetScreen = NSScreen.screens.first ?? NSScreen.main
+            if let visibleFrame = targetScreen?.visibleFrame {
+                let origin = NSPoint(
+                    x: visibleFrame.maxX - window.frame.width - 24,
+                    y: visibleFrame.maxY - window.frame.height - 24
+                )
+                window.setFrameOrigin(origin)
+            } else {
+                window.center()
+            }
+            statusWindow = window
+        }
+
+        statusWindow?.orderFrontRegardless()
     }
 }
 
 @main
 struct CodexStatusLightApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    @StateObject private var store = StatusStore()
 
     var body: some Scene {
         MenuBarExtra {
-            MenuStatusView(store: store)
+            MenuStatusView(store: appDelegate.store) {
+                appDelegate.showWindow()
+            }
         } label: {
-            let state = store.primary?.state ?? .running
+            let state = appDelegate.store.primary?.state ?? .running
             MenuStatusIcon(state: state)
         }
-
-        Window("Codex Status Light", id: "status-light") {
-            StatusContentView(store: store)
-        }
-        .windowResizability(.contentSize)
     }
 }
 
 struct MenuStatusView: View {
     @ObservedObject var store: StatusStore
-    @Environment(\.openWindow) private var openWindow
+    let showWindow: () -> Void
 
     var body: some View {
         let primary = store.primary
@@ -257,8 +286,7 @@ struct MenuStatusView: View {
                 .lineLimit(2)
             Divider()
             Button("Show floating light") {
-                openWindow(id: "status-light")
-                NSApp.activate(ignoringOtherApps: true)
+                showWindow()
             }
             Button("Refresh") { store.refresh() }
             Divider()
