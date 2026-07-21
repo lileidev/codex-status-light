@@ -1,0 +1,4 @@
+interface:
+  display_name: "Codex Status Light"
+  short_description: "Synchronize a desktop light with Codex task state."
+  default_prompt: "Use the Codex status light while working and update it when running, waiting for input, completed, or blocked."
