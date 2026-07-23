@@ -43,6 +43,8 @@ struct SessionState: Codable, Identifiable, Equatable {
     var cwd: String
     var updatedAt: Date
     var turnID: String?
+    var source: String?
+    var isStreaming: Bool = false
 
     var id: String { sessionID }
 
@@ -53,8 +55,45 @@ struct SessionState: Codable, Identifiable, Equatable {
         case cwd
         case updatedAt = "updated_at"
         case turnID = "turn_id"
+        case source
+        case isStreaming = "is_streaming"
+    }
+
+    init(
+        sessionID: String,
+        state: LightState,
+        message: String,
+        cwd: String,
+        updatedAt: Date,
+        turnID: String?,
+        source: String?,
+        isStreaming: Bool = false
+    ) {
+        self.sessionID = sessionID
+        self.state = state
+        self.message = message
+        self.cwd = cwd
+        self.updatedAt = updatedAt
+        self.turnID = turnID
+        self.source = source
+        self.isStreaming = isStreaming
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        sessionID = try container.decode(String.self, forKey: .sessionID)
+        state = try container.decode(LightState.self, forKey: .state)
+        message = try container.decode(String.self, forKey: .message)
+        cwd = try container.decode(String.self, forKey: .cwd)
+        updatedAt = try container.decode(Date.self, forKey: .updatedAt)
+        turnID = try container.decodeIfPresent(String.self, forKey: .turnID)
+        source = try container.decodeIfPresent(String.self, forKey: .source)
+        isStreaming = try container.decodeIfPresent(Bool.self, forKey: .isStreaming) ?? false
     }
 }
+
+private let activeSessionThreshold: TimeInterval = 60
+private let staleSessionThreshold: TimeInterval = 43_200
 
 @MainActor
 final class StatusStore: ObservableObject {
@@ -80,12 +119,11 @@ final class StatusStore: ObservableObject {
     }
 
     var primary: SessionState? {
-        let recent = sessions.filter { Date().timeIntervalSince($0.updatedAt) < 43_200 }
-        return recent.max { lhs, rhs in
-            let lp = priority(lhs.state)
-            let rp = priority(rhs.state)
-            return lp == rp ? lhs.updatedAt < rhs.updatedAt : lp < rp
-        } ?? sessions.first
+        let active = sessions.filter { Date().timeIntervalSince($0.updatedAt) < activeSessionThreshold }
+        if let mostRecentActive = active.max(by: { $0.updatedAt < $1.updatedAt }) {
+            return mostRecentActive
+        }
+        return sessions.filter { $0.state == .done }.max(by: { $0.updatedAt < $1.updatedAt })
     }
 
     func refresh() {
@@ -98,6 +136,8 @@ final class StatusStore: ObservableObject {
             return
         }
 
+        let now = Date()
+
         sessions = urls.compactMap { url in
             guard url.pathExtension == "json",
                   let data = try? Data(contentsOf: url),
@@ -105,34 +145,35 @@ final class StatusStore: ObservableObject {
             else { return nil }
             return state
         }.sorted { $0.updatedAt > $1.updatedAt }
-    }
 
-    private func priority(_ state: LightState) -> Int {
-        switch state {
-        case .error: 4
-        case .waiting: 3
-        case .running: 2
-        case .done: 1
+        for url in urls where url.pathExtension == "json" {
+            guard let data = try? Data(contentsOf: url),
+                  let state = try? decoder.decode(SessionState.self, from: data)
+            else { continue }
+            if now.timeIntervalSince(state.updatedAt) > staleSessionThreshold {
+                try? FileManager.default.removeItem(at: url)
+            }
         }
     }
 }
 
 struct TrafficLightView: View {
-    let activeState: LightState
+    let activeState: LightState?
+    let isStreaming: Bool
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 0.55)) { context in
             let runningOn = Int(context.date.timeIntervalSinceReferenceDate / 0.55).isMultiple(of: 2)
-            VStack(spacing: 10) {
+            HStack(spacing: 4) {
                 lamp(.error, color: .red, illuminated: activeState == .error)
                 lamp(.waiting, color: .yellow, illuminated: activeState == .waiting)
                 lamp(.done, color: .green, illuminated: activeState == .done)
-                lamp(.running, color: .blue, illuminated: activeState == .running && runningOn)
+                lamp(.running, color: .blue, illuminated: activeState == .running && (!isStreaming || runningOn))
             }
-            .padding(12)
-            .background(.black.opacity(0.88), in: RoundedRectangle(cornerRadius: 22))
+            .padding(6)
+            .background(.black.opacity(0.88), in: RoundedRectangle(cornerRadius: 12))
             .overlay {
-                RoundedRectangle(cornerRadius: 22)
+                RoundedRectangle(cornerRadius: 12)
                     .stroke(.white.opacity(0.14), lineWidth: 1)
             }
         }
@@ -141,18 +182,18 @@ struct TrafficLightView: View {
     private func lamp(_ state: LightState, color: Color, illuminated: Bool) -> some View {
         Circle()
             .fill(illuminated ? color : color.opacity(0.14))
-            .frame(width: 42, height: 42)
-            .shadow(color: illuminated ? color.opacity(0.9) : .clear, radius: 10)
+            .frame(width: 24, height: 24)
+            .shadow(color: illuminated ? color.opacity(0.9) : .clear, radius: 6)
     }
 }
 
 struct MenuStatusIcon: View {
-    let state: LightState
+    let state: LightState?
 
     var body: some View {
-        Image(systemName: state.menuSymbol)
-            .symbolRenderingMode(.palette)
-            .foregroundStyle(state.color)
+        Image(systemName: state?.menuSymbol ?? "circle")
+            .symbolRenderingMode(.monochrome)
+            .foregroundStyle(state?.color ?? .secondary)
     }
 }
 
@@ -161,40 +202,39 @@ struct StatusContentView: View {
 
     var body: some View {
         let primary = store.primary
-        HStack(alignment: .top, spacing: 16) {
-            TrafficLightView(activeState: primary?.state ?? .running)
+        VStack(alignment: .leading, spacing: 8) {
+            TrafficLightView(activeState: primary?.state, isStreaming: primary?.isStreaming ?? false)
 
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
                     Circle()
                         .fill(primary?.state.color ?? .secondary)
-                        .frame(width: 10, height: 10)
+                        .frame(width: 8, height: 8)
                     Text(primary?.state.label ?? "Idle")
-                        .font(.headline)
+                        .font(.subheadline)
                 }
 
                 Text(primary?.message ?? "Waiting for a Codex task")
-                    .font(.body)
-                    .lineLimit(3)
-                    .frame(maxWidth: 270, alignment: .leading)
+                    .font(.caption)
+                    .lineLimit(2)
+                    .frame(maxWidth: 160, alignment: .leading)
 
                 if let cwd = primary?.cwd, !cwd.isEmpty {
                     Text(URL(fileURLWithPath: cwd).lastPathComponent)
-                        .font(.caption)
+                        .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
 
                 if store.sessions.count > 1 {
                     Divider()
                     Text("\(store.sessions.count) recent sessions")
-                        .font(.caption)
+                        .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
             }
-            .padding(.top, 6)
         }
-        .padding(18)
-        .frame(minWidth: 390, minHeight: 190)
+        .padding(12)
+        .frame(minWidth: 180, minHeight: 110)
         .background(FloatingWindowAccessor())
     }
 }
@@ -227,7 +267,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func showWindow() {
         if statusWindow == nil {
             let window = NSPanel(
-                contentRect: NSRect(x: 0, y: 0, width: 430, height: 220),
+                contentRect: NSRect(x: 0, y: 0, width: 200, height: 130),
                 styleMask: [.titled, .closable, .nonactivatingPanel],
                 backing: .buffered,
                 defer: false
@@ -267,7 +307,7 @@ struct CodexStatusLightApp: App {
                 appDelegate.showWindow()
             }
         } label: {
-            let state = appDelegate.store.primary?.state ?? .running
+            let state = appDelegate.store.primary?.state
             MenuStatusIcon(state: state)
         }
     }
