@@ -19,7 +19,7 @@ def install_root() -> pathlib.Path:
     ).expanduser()
 
 
-def emit(state: str, message: str, event: dict) -> None:
+def emit(state: str, message: str, event: dict, is_streaming: bool = False) -> None:
     command = install_root() / "bin" / "codex-status-light"
     if not command.exists():
         return
@@ -29,9 +29,12 @@ def emit(state: str, message: str, event: dict) -> None:
         "--message", message,
         "--cwd", str(event.get("cwd") or os.getcwd()),
         "--source", f"hook:{event.get('hook_event_name', 'unknown')}",
+        "--quiet",
     ]
     if event.get("turn_id"):
         args.extend(["--turn", str(event["turn_id"])])
+    if is_streaming:
+        args.append("--streaming")
     subprocess.run(args, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 

@@ -6,8 +6,9 @@ A macOS menu-bar and floating traffic light for Codex task state.
 |---|---|
 | Red | A tool failed or the task was marked blocked |
 | Yellow | Codex needs input or approval |
-| Green | The turn completed |
-| Blinking blue | Codex is running normally |
+| Green | The turn completed / idle |
+| Solid blue | Codex is running normally |
+| Blinking blue | Codex is actively streaming output |
 
 ## Build and run
 
@@ -35,19 +36,26 @@ python3 scripts/install.py
 
 The installer copies the CLI and hooks under `~/.codex/status-light`, merges
 `~/.codex/hooks.json` after making a timestamped backup when necessary, and
-links the personal skill into `~/.agents/skills/codex-status-light`. It also
 creates `~/Library/LaunchAgents/com.local.codex-status-light.plist` so the
 packaged app opens at login. Pass `--no-launch-agent` to opt out.
 
 After installation, restart Codex and use `/hooks` to review and trust the new
 command hooks. Hooks automatically track turn start, permission requests, tool
-errors, and turn completion. The skill handles semantic waiting/blocking states.
+errors, and turn completion.
 
 ## Manual CLI
 
 ```sh
+# Update status manually
 ~/.codex/status-light/bin/codex-status-light waiting \
   --session manual --message "Need architecture approval"
+
+# Indicate the assistant is actively streaming output
+~/.codex/status-light/bin/codex-status-light running \
+  --session manual --message "Streaming..." --streaming
+
+# Clear a session
+~/.codex/status-light/bin/codex-status-light --clear --session manual
 ```
 
 Set `CODEX_STATUS_LIGHT_DIR` to use a different state directory for tests.

@@ -66,7 +66,7 @@ struct SessionState: Codable, Identifiable, Equatable {
         cwd: String,
         updatedAt: Date,
         turnID: String?,
-        source: String?,
+        source: String? = nil,
         isStreaming: Bool = false
     ) {
         self.sessionID = sessionID
@@ -120,10 +120,23 @@ final class StatusStore: ObservableObject {
 
     var primary: SessionState? {
         let active = sessions.filter { Date().timeIntervalSince($0.updatedAt) < activeSessionThreshold }
-        if let mostRecentActive = active.max(by: { $0.updatedAt < $1.updatedAt }) {
-            return mostRecentActive
+        if !active.isEmpty {
+            return active.max { lhs, rhs in
+                let lp = priority(lhs.state)
+                let rp = priority(rhs.state)
+                return lp == rp ? lhs.updatedAt < rhs.updatedAt : lp < rp
+            }
         }
         return sessions.filter { $0.state == .done }.max(by: { $0.updatedAt < $1.updatedAt })
+    }
+
+    private func priority(_ state: LightState) -> Int {
+        switch state {
+        case .error: 4
+        case .waiting: 3
+        case .running: 2
+        case .done: 1
+        }
     }
 
     func refresh() {
@@ -193,7 +206,7 @@ struct MenuStatusIcon: View {
     var body: some View {
         Image(systemName: state?.menuSymbol ?? "circle")
             .symbolRenderingMode(.monochrome)
-            .foregroundStyle(state?.color ?? .secondary)
+            .foregroundStyle(state?.color ?? .green)
     }
 }
 
