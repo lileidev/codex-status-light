@@ -1,4 +1,6 @@
 import AppKit
+import Combine
+import Darwin
 import SwiftUI
 
 enum LightState: String, Codable, CaseIterable {
@@ -33,7 +35,6 @@ enum LightState: String, Codable, CaseIterable {
         case .error: .red
         }
     }
-
 }
 
 struct SessionState: Codable, Identifiable, Equatable {
@@ -66,7 +67,7 @@ struct SessionState: Codable, Identifiable, Equatable {
         cwd: String,
         updatedAt: Date,
         turnID: String?,
-        source: String? = nil,
+        source: String?,
         isStreaming: Bool = false
     ) {
         self.sessionID = sessionID
@@ -90,10 +91,20 @@ struct SessionState: Codable, Identifiable, Equatable {
         source = try container.decodeIfPresent(String.self, forKey: .source)
         isStreaming = try container.decodeIfPresent(Bool.self, forKey: .isStreaming) ?? false
     }
+
+    /// A compact label for the session: "<folder> <HHmmss>".
+    /// The timestamp lets multiple instances in the same directory remain
+    /// distinguishable, and avoids special characters like colons.
+    var displayTitle: String {
+        let folder = cwd.isEmpty ? "unknown" : URL(fileURLWithPath: cwd).lastPathComponent
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HHmmss"
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        return "\(folder) \(formatter.string(from: updatedAt))"
+    }
 }
 
-private let activeSessionThreshold: TimeInterval = 60
-private let staleSessionThreshold: TimeInterval = 43_200
+private let staleSessionThreshold: TimeInterval = 43_200  // 12 hours
 
 @MainActor
 final class StatusStore: ObservableObject {
@@ -118,17 +129,23 @@ final class StatusStore: ObservableObject {
             .appendingPathComponent(".codex/status-light/sessions", isDirectory: true)
     }
 
-    var primary: SessionState? {
-        let active = sessions.filter { Date().timeIntervalSince($0.updatedAt) < activeSessionThreshold }
-        if !active.isEmpty {
-            return active.max { lhs, rhs in
-                let lp = priority(lhs.state)
-                let rp = priority(rhs.state)
-                return lp == rp ? lhs.updatedAt < rhs.updatedAt : lp < rp
-            }
+    /// Sessions that should currently be displayed in the UI.
+    ///
+    /// Mirrors opencode-status-light: every loaded session is shown and sorted by
+    /// priority (error > waiting > running > done), then by most recent update.
+    /// The UI renders an idle state when this list is empty.
+    var displaySessions: [SessionState] {
+        sessions.sorted {
+            let lp = priority($0.state)
+            let rp = priority($1.state)
+            if lp != rp { return lp > rp }
+            return $0.updatedAt > $1.updatedAt
         }
-        return sessions.filter { $0.state == .done }.max(by: { $0.updatedAt < $1.updatedAt })
     }
+
+    /// The highest-priority display session, used for the menu-bar icon and for
+    /// backward-compatible single-light consumers.
+    var primary: SessionState? { displaySessions.first }
 
     private func priority(_ state: LightState) -> Int {
         switch state {
@@ -137,6 +154,30 @@ final class StatusStore: ObservableObject {
         case .running: 2
         case .done: 1
         }
+    }
+
+    /// Best-effort process name lookup for a given PID using `sysctl`.
+    /// Used to clean up session files left behind by exited Codex processes.
+    private func processName(for pid: pid_t) -> String? {
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+        var info = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.stride
+        let result = sysctl(&mib, u_int(mib.count), &info, &size, nil, 0)
+        guard result == 0 else { return nil }
+        return withUnsafePointer(to: &info.kp_proc.p_comm) {
+            $0.withMemoryRebound(to: CChar.self, capacity: Int(MAXCOMLEN)) {
+                String(cString: $0)
+            }
+        }
+    }
+
+    /// Returns `true` only when the numeric session ID looks like a live Codex
+    /// process. Non-numeric IDs (e.g. "manual") are left untouched.
+    private func isCodexProcessAlive(sessionID: String) -> Bool {
+        guard let pid = pid_t(sessionID) else { return true }
+        if kill(pid, 0) != 0 { return false }
+        guard let name = processName(for: pid) else { return false }
+        return name.lowercased().contains("codex")
     }
 
     func refresh() {
@@ -151,23 +192,31 @@ final class StatusStore: ObservableObject {
 
         let now = Date()
 
-        sessions = urls.compactMap { url in
-            guard url.pathExtension == "json",
-                  let data = try? Data(contentsOf: url),
-                  let state = try? decoder.decode(SessionState.self, from: data)
-            else { return nil }
-            return state
-        }.sorted { $0.updatedAt > $1.updatedAt }
-
+        var pairs: [(state: SessionState, url: URL)] = []
         for url in urls where url.pathExtension == "json" {
             guard let data = try? Data(contentsOf: url),
                   let state = try? decoder.decode(SessionState.self, from: data)
             else { continue }
+
+            // Remove sessions whose Codex process has already exited.
+            if !isCodexProcessAlive(sessionID: state.sessionID) {
+                try? FileManager.default.removeItem(at: url)
+                continue
+            }
+
+            pairs.append((state, url))
+        }
+
+        sessions = pairs.map { $0.state }.sorted { $0.updatedAt > $1.updatedAt }
+
+        // Clean up very old session files so the directory does not grow forever.
+        for (state, url) in pairs {
             if now.timeIntervalSince(state.updatedAt) > staleSessionThreshold {
                 try? FileManager.default.removeItem(at: url)
             }
         }
     }
+
 }
 
 struct TrafficLightView: View {
@@ -184,10 +233,10 @@ struct TrafficLightView: View {
                 lamp(.running, color: .blue, illuminated: activeState == .running && (!isStreaming || runningOn))
             }
             .padding(6)
-            .background(.black.opacity(0.88), in: RoundedRectangle(cornerRadius: 12))
+            .background(.black.opacity(0.45), in: RoundedRectangle(cornerRadius: 12))
             .overlay {
                 RoundedRectangle(cornerRadius: 12)
-                    .stroke(.white.opacity(0.14), lineWidth: 1)
+                    .stroke(.white.opacity(0.18), lineWidth: 1)
             }
         }
     }
@@ -210,54 +259,88 @@ struct MenuStatusIcon: View {
     }
 }
 
-struct StatusContentView: View {
-    @ObservedObject var store: StatusStore
+struct SessionRowView: View {
+    let session: SessionState
 
     var body: some View {
-        let primary = store.primary
-        VStack(alignment: .leading, spacing: 8) {
-            TrafficLightView(activeState: primary?.state, isStreaming: primary?.isStreaming ?? false)
-
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 6) {
-                    Circle()
-                        .fill(primary?.state.color ?? .secondary)
-                        .frame(width: 8, height: 8)
-                    Text(primary?.state.label ?? "Idle")
-                        .font(.subheadline)
-                }
-
-                Text(primary?.message ?? "Waiting for a Codex task")
+        HStack(alignment: .top, spacing: 8) {
+            TrafficLightView(activeState: session.state, isStreaming: session.isStreaming)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(session.displayTitle)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Text(session.message)
                     .font(.caption)
                     .lineLimit(2)
-                    .frame(maxWidth: 160, alignment: .leading)
-
-                if let cwd = primary?.cwd, !cwd.isEmpty {
-                    Text(URL(fileURLWithPath: cwd).lastPathComponent)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-
-                if store.sessions.count > 1 {
-                    Divider()
-                    Text("\(store.sessions.count) recent sessions")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
-        .padding(12)
-        .frame(minWidth: 180, minHeight: 110)
-        .background(FloatingWindowAccessor())
+    }
+}
+
+struct StatusContentView: View {
+    @ObservedObject var store: StatusStore
+    @State private var window: NSWindow?
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            VStack(alignment: .leading, spacing: 8) {
+                if store.displaySessions.isEmpty {
+                    HStack(alignment: .top, spacing: 8) {
+                        TrafficLightView(activeState: .done, isStreaming: false)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Idle")
+                                .font(.caption)
+                            Text("Waiting for a Codex task")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                } else {
+                    LazyVStack(alignment: .leading, spacing: 10) {
+                        ForEach(store.displaySessions) { session in
+                            SessionRowView(session: session)
+                        }
+                    }
+                    .padding(.vertical, 2)
+                }
+            }
+            .padding(12)
+            .frame(width: 260)
+            .background(
+                RoundedRectangle(cornerRadius: 16)
+                    .fill(.ultraThinMaterial)
+                    .overlay(RoundedRectangle(cornerRadius: 16).fill(.black.opacity(0.25)))
+                    .overlay(RoundedRectangle(cornerRadius: 16).stroke(.white.opacity(0.18), lineWidth: 1))
+            )
+
+            Button {
+                window?.close()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(.white.opacity(0.7))
+                    .padding(8)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .padding(.top, 8)
+            .padding(.trailing, 8)
+        }
+        .background(FloatingWindowAccessor { window = $0 })
     }
 }
 
 struct FloatingWindowAccessor: NSViewRepresentable {
+    let onWindow: (NSWindow) -> Void
+
     func makeNSView(context: Context) -> NSView {
         let view = NSView()
         DispatchQueue.main.async {
-            view.window?.level = .floating
-            view.window?.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+            if let window = view.window {
+                onWindow(window)
+            }
         }
         return view
     }
@@ -269,35 +352,57 @@ struct FloatingWindowAccessor: NSViewRepresentable {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let store = StatusStore()
     private var statusWindow: NSPanel?
+    private var cancellables = Set<AnyCancellable>()
+
+    /// Height needed to show all sessions without scrolling.
+    /// - One session / idle row needs about 120 pt.
+    /// - Each additional session adds roughly one row height.
+    private func windowHeight(for sessionCount: Int) -> CGFloat {
+        let rowHeight: CGFloat = 56
+        let baseHeight: CGFloat = 64
+        return max(120, baseHeight + CGFloat(sessionCount) * rowHeight)
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
             self?.showWindow()
         }
+
+        // Resize the floating window whenever the underlying sessions change.
+        store.$sessions
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.resizeWindow() }
+            .store(in: &cancellables)
     }
 
     func showWindow() {
         if statusWindow == nil {
+            let height = windowHeight(for: store.displaySessions.count)
             let window = NSPanel(
-                contentRect: NSRect(x: 0, y: 0, width: 200, height: 130),
-                styleMask: [.titled, .closable, .nonactivatingPanel],
+                contentRect: NSRect(x: 0, y: 0, width: 260, height: height),
+                styleMask: [.borderless, .nonactivatingPanel],
                 backing: .buffered,
                 defer: false
             )
+            // No system title bar; the SwiftUI view provides its own close button.
             window.title = "Codex Status Light"
             window.contentView = NSHostingView(rootView: StatusContentView(store: store))
             window.level = .floating
             window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+            window.isOpaque = false
+            window.backgroundColor = .clear
             window.isFloatingPanel = true
             window.hidesOnDeactivate = false
             window.becomesKeyOnlyIfNeeded = true
             window.isReleasedWhenClosed = false
+            window.isMovableByWindowBackground = true
+            window.hasShadow = true
             let targetScreen = NSScreen.screens.first ?? NSScreen.main
             if let visibleFrame = targetScreen?.visibleFrame {
                 let origin = NSPoint(
                     x: visibleFrame.maxX - window.frame.width - 24,
-                    y: visibleFrame.maxY - window.frame.height - 24
+                    y: visibleFrame.maxY - height - 24
                 )
                 window.setFrameOrigin(origin)
             } else {
@@ -307,6 +412,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         statusWindow?.orderFrontRegardless()
+    }
+
+    private func resizeWindow() {
+        guard let window = statusWindow else { return }
+
+        let newHeight = windowHeight(for: store.displaySessions.count)
+        let frame = window.frame
+        let newOrigin = NSPoint(
+            x: frame.maxX - frame.width,
+            y: frame.maxY - newHeight
+        )
+        window.setFrame(
+            NSRect(x: newOrigin.x, y: newOrigin.y, width: frame.width, height: newHeight),
+            display: true,
+            animate: false
+        )
     }
 }
 
@@ -331,21 +452,47 @@ struct MenuStatusView: View {
     let showWindow: () -> Void
 
     var body: some View {
-        let primary = store.primary
-        VStack(alignment: .leading, spacing: 8) {
-            Label(primary?.state.label ?? "Idle", systemImage: primary?.state.menuSymbol ?? "circle")
-            Text(primary?.message ?? "Waiting for a Codex task")
-                .font(.caption)
-                .lineLimit(2)
-            Divider()
-            Button("Show floating light") {
-                showWindow()
+        VStack(alignment: .leading, spacing: 0) {
+            if store.displaySessions.isEmpty {
+                HStack(alignment: .top, spacing: 8) {
+                    TrafficLightView(activeState: .done, isStreaming: false)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Idle")
+                            .font(.caption)
+                        Text("Waiting for a Codex task")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(.vertical, 6)
+                Divider()
+            } else {
+                LazyVStack(alignment: .leading, spacing: 10) {
+                    ForEach(store.displaySessions) { session in
+                        SessionRowView(session: session)
+                    }
+                }
+                .padding(.vertical, 6)
+                Divider()
             }
-            Button("Refresh") { store.refresh() }
-            Divider()
-            Button("Quit") { NSApp.terminate(nil) }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Button("Show floating light") {
+                    showWindow()
+                }
+                Button("Refresh") { store.refresh() }
+                Divider()
+                Button("Quit") { NSApp.terminate(nil) }
+            }
+            .padding(.vertical, 8)
         }
-        .padding(8)
+        .padding(.horizontal, 12)
         .frame(width: 260)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(.ultraThinMaterial)
+                .overlay(RoundedRectangle(cornerRadius: 12).fill(.black.opacity(0.25)))
+                .overlay(RoundedRectangle(cornerRadius: 12).stroke(.white.opacity(0.18), lineWidth: 1))
+        )
     }
 }
