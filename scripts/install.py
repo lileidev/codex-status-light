@@ -9,6 +9,7 @@ import json
 import pathlib
 import plistlib
 import shutil
+import subprocess
 
 
 HOOK_EVENTS = ("SessionStart", "UserPromptSubmit", "PermissionRequest", "PreToolUse", "PostToolUse", "Stop")
@@ -26,13 +27,33 @@ def merge_hooks(existing: dict, addition: dict) -> dict:
     return result
 
 
+def remove_legacy_launch_agent() -> None:
+    """Unload and delete any previously installed login LaunchAgent."""
+    launch_agent = pathlib.Path.home() / "Library" / "LaunchAgents" / "com.local.codex-status-light.plist"
+    if not launch_agent.exists():
+        return
+    subprocess.run(
+        ["launchctl", "unload", str(launch_agent)],
+        capture_output=True,
+    )
+    try:
+        launch_agent.unlink()
+        print(f"removed_legacy_launch_agent={launch_agent}")
+    except Exception as exc:
+        print(f"warning: failed to remove legacy launch agent: {exc}", file=__import__("sys").stderr)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--project-root", default=str(pathlib.Path(__file__).resolve().parents[1]))
     parser.add_argument("--codex-home", default=str(pathlib.Path.home() / ".codex"))
     parser.add_argument("--skills-home", default=str(pathlib.Path.home() / ".agents" / "skills"))
     parser.add_argument("--app-path", default=str(pathlib.Path.home() / "Applications" / "Codex Status Light.app"))
-    parser.add_argument("--no-launch-agent", action="store_true")
+    parser.add_argument(
+        "--launch-agent",
+        action="store_true",
+        help="Install a login LaunchAgent that starts the app at login (legacy behavior).",
+    )
     args = parser.parse_args()
 
     root = pathlib.Path(args.project_root).resolve()
@@ -41,6 +62,10 @@ def main() -> int:
     skills_home = pathlib.Path(args.skills_home).expanduser().resolve()
     install.mkdir(parents=True, exist_ok=True)
     skills_home.mkdir(parents=True, exist_ok=True)
+
+    # Always remove the legacy login auto-start behavior. The app is now
+    # launched on-demand by the Codex command hooks.
+    remove_legacy_launch_agent()
 
     for name in ("bin", "hooks"):
         destination = install / name
@@ -71,7 +96,7 @@ def main() -> int:
     skill_destination.symlink_to(skill_source, target_is_directory=True)
 
     launch_agent = None
-    if not args.no_launch_agent:
+    if args.launch_agent:
         launch_agents = pathlib.Path.home() / "Library" / "LaunchAgents"
         launch_agents.mkdir(parents=True, exist_ok=True)
         launch_agent = launch_agents / "com.local.codex-status-light.plist"

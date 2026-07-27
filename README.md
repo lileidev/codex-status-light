@@ -36,8 +36,15 @@ python3 scripts/install.py
 
 The installer copies the CLI and hooks under `~/.codex/status-light`, merges
 `~/.codex/hooks.json` after making a timestamped backup when necessary, and
-creates `~/Library/LaunchAgents/com.local.codex-status-light.plist` so the
-packaged app opens at login. Pass `--no-launch-agent` to opt out.
+removes any legacy login LaunchAgent. The app is now launched automatically
+when Codex starts or processes a command (via the `SessionStart` hook and
+subsequent lifecycle hooks).
+
+If you prefer the old login auto-launch behavior, pass `--launch-agent`:
+
+```sh
+python3 scripts/install.py --launch-agent
+```
 
 After installation, restart Codex and use `/hooks` to review and trust the new
 command hooks. Hooks automatically track turn start, permission requests, tool
