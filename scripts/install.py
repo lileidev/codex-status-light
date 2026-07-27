@@ -27,6 +27,31 @@ def merge_hooks(existing: dict, addition: dict) -> dict:
     return result
 
 
+def absolutify_hook_commands(config: dict, python_path: pathlib.Path, hook_script: pathlib.Path) -> dict:
+    """Rewrite hook commands to use absolute interpreter and script paths.
+
+    Codex may run hooks with a minimal PATH that does not include `python3`,
+    and it may not expand `~` in command strings. Absolute paths avoid both
+    issues.
+    """
+    absolute_command = f"{python_path} {hook_script}"
+    copied = json.loads(json.dumps(config))
+
+    def replace(obj):
+        if isinstance(obj, dict):
+            if obj.get("type") == "command" and "codex_status_hook.py" in obj.get("command", ""):
+                obj["command"] = absolute_command
+            else:
+                for value in obj.values():
+                    replace(value)
+        elif isinstance(obj, list):
+            for item in obj:
+                replace(item)
+
+    replace(copied)
+    return copied
+
+
 def remove_legacy_launch_agent() -> None:
     """Unload and delete any previously installed login LaunchAgent."""
     launch_agent = pathlib.Path.home() / "Library" / "LaunchAgents" / "com.local.codex-status-light.plist"
@@ -84,7 +109,13 @@ def main() -> int:
     else:
         existing = {}
     addition = json.loads((root / "hooks" / "hooks.json").read_text(encoding="utf-8"))
-    hooks_path.write_text(json.dumps(merge_hooks(existing, addition), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    merged = merge_hooks(existing, addition)
+    merged = absolutify_hook_commands(
+        merged,
+        python_path=pathlib.Path("/usr/bin/python3"),
+        hook_script=install / "hooks" / "codex_status_hook.py",
+    )
+    hooks_path.write_text(json.dumps(merged, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
     skill_source = root / "skill" / "codex-status-light"
     skill_destination = skills_home / "codex-status-light"

@@ -8,3 +8,4 @@ DerivedData/
 .netrc
 __pycache__/
 *.pyc
+hook.log

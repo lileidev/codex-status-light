@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import os
 import pathlib
@@ -21,6 +22,18 @@ def install_root() -> pathlib.Path:
             str(pathlib.Path.home() / ".codex" / "status-light"),
         )
     ).expanduser()
+
+
+def _log(message: str) -> None:
+    """Append a timestamped line to the hook log for debugging."""
+    try:
+        log_path = install_root() / "hook.log"
+        timestamp = dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
+        with log_path.open("a", encoding="utf-8") as handle:
+            handle.write(f"{timestamp} {message}\n")
+    except Exception:
+        # Logging must never break the hook.
+        pass
 
 
 def _app_path() -> pathlib.Path:
@@ -42,25 +55,29 @@ def ensure_app_running() -> None:
     Uses a short cooldown lock to avoid repeated open(1) calls when Codex fires
     several lifecycle events in quick succession.
     """
+    _log("ensure_app_running: start")
     try:
         probe = subprocess.run(
-            ["pgrep", "-x", "CodexStatusLight"],
+            ["/usr/bin/pgrep", "-x", "CodexStatusLight"],
             capture_output=True,
             timeout=2,
         )
+        _log(f"ensure_app_running: pgrep returncode={probe.returncode}")
         if probe.returncode == 0:
             return
-    except Exception:
-        pass
+    except Exception as exc:
+        _log(f"ensure_app_running: pgrep error {exc}")
 
     lock = _launch_lock_path()
     try:
         if lock.exists():
             elapsed = time.time() - lock.stat().st_mtime
+            _log(f"ensure_app_running: lock age={elapsed:.1f}s")
             if elapsed < _LAUNCH_COOLDOWN_SECONDS:
+                _log("ensure_app_running: skipped due to cooldown")
                 return
-    except Exception:
-        pass
+    except Exception as exc:
+        _log(f"ensure_app_running: lock check error {exc}")
 
     app = _app_path()
     if app.exists():
@@ -68,17 +85,31 @@ def ensure_app_running() -> None:
     else:
         cmd = ["/usr/bin/open", "-g", "-a", "Codex Status Light"]
 
-    subprocess.run(cmd, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    _log(f"ensure_app_running: launching with {cmd}")
+    try:
+        result = subprocess.run(
+            cmd,
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        _log(f"ensure_app_running: open returncode={result.returncode}")
+    except Exception as exc:
+        _log(f"ensure_app_running: open error {exc}")
+        return
+
     try:
         lock.parent.mkdir(parents=True, exist_ok=True)
         lock.touch(exist_ok=True)
-    except Exception:
-        pass
+        _log("ensure_app_running: lock touched")
+    except Exception as exc:
+        _log(f"ensure_app_running: lock touch error {exc}")
 
 
 def emit(state: str, message: str, event: dict, is_streaming: bool = False) -> None:
     command = install_root() / "bin" / "codex-status-light"
     if not command.exists():
+        _log(f"emit: CLI not found at {command}")
         return
     args = [
         str(command), state,
@@ -92,6 +123,7 @@ def emit(state: str, message: str, event: dict, is_streaming: bool = False) -> N
         args.extend(["--turn", str(event["turn_id"])])
     if is_streaming:
         args.append("--streaming")
+    _log(f"emit: state={state} args={args}")
     subprocess.run(args, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
@@ -125,14 +157,17 @@ def current_state(event: dict) -> str | None:
 def main() -> int:
     try:
         event = json.load(sys.stdin)
-    except Exception:
+    except Exception as exc:
+        _log(f"main: failed to parse stdin: {exc}")
         return 0
+
+    name = event.get("hook_event_name", "")
+    _log(f"main: event={name}")
 
     # Make sure the status-light app is running whenever Codex is active.
     # SessionStart is the first hook fired, so this also covers "Codex started".
     ensure_app_running()
 
-    name = event.get("hook_event_name", "")
     tool = event.get("tool_name") or event.get("tool") or "tool"
 
     if name in {"SessionStart", "UserPromptSubmit"}:
