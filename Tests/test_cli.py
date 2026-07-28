@@ -64,6 +64,41 @@ class StatusLightTests(unittest.TestCase):
             state = json.loads((pathlib.Path(directory) / "approval.json").read_text())
             self.assertEqual(state["state"], "running")
 
+    def test_user_prompt_submit_clears_waiting_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            environment = os.environ.copy()
+            environment["CODEX_STATUS_LIGHT_HOME"] = str(ROOT)
+            environment["CODEX_STATUS_LIGHT_DIR"] = directory
+
+            def run_hook(event):
+                subprocess.run(
+                    ["python3", str(HOOK)],
+                    input=json.dumps(event),
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    env=environment,
+                )
+
+            # Waiting for permission or question (yellow light).
+            run_hook({
+                "hook_event_name": "PermissionRequest",
+                "session_id": "approval",
+                "tool_name": "Bash",
+            })
+            waiting_state = json.loads((pathlib.Path(directory) / "approval.json").read_text())
+            self.assertEqual(waiting_state["state"], "waiting")
+
+            # User answers/grants permission (should turn blue immediately).
+            run_hook({
+                "hook_event_name": "UserPromptSubmit",
+                "session_id": "approval",
+            })
+
+            state = json.loads((pathlib.Path(directory) / "approval.json").read_text())
+            self.assertEqual(state["state"], "running")
+            self.assertEqual(state["is_streaming"], True)
+
 
 if __name__ == "__main__":
     unittest.main()

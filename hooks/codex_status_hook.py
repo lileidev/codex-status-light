@@ -243,6 +243,10 @@ def main() -> int:
     if name == "SessionStart":
         set_state(session_id, "running", "Codex is working", event, is_streaming=False)
     elif name == "UserPromptSubmit":
+        # A new user prompt means the user has answered a waiting question or
+        # granted a permission request. Clear the awaiting-input guard so the
+        # light transitions from yellow back to blue immediately.
+        _awaiting_input.discard(session_id)
         # Codex has no message.part.updated event; approximate streaming by marking
         # the running state as streaming until the first PostToolUse arrives.
         set_state(session_id, "running", "Codex is working", event, is_streaming=True)
