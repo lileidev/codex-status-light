@@ -1,14 +1,14 @@
 # Codex Status Light
 
-A macOS menu-bar and floating traffic light for Codex task state.
+A macOS menu-bar and floating status light for Codex task state.
 
-| Light | Meaning |
-|---|---|
-| Red | A tool failed or the task was marked blocked |
-| Yellow | Codex needs input or approval |
-| Green | The turn completed / idle |
-| Solid blue | Codex is running normally |
-| Blinking blue | Codex is actively streaming output |
+| State | Color | Meaning |
+|---|---|---|
+| `running` | Blue (solid) | Codex is running normally |
+| `running` | Blue (blinking) | Codex is actively streaming output |
+| `waiting` | Yellow | Codex needs input or approval |
+| `done` | Green | The turn completed / idle |
+| `error` | Red | A tool failed or the task was marked blocked |
 
 ## Build and run
 

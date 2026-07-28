@@ -219,43 +219,51 @@ final class StatusStore: ObservableObject {
 
 }
 
-struct TrafficLightView: View {
+struct StatusLightView: View {
     let activeState: LightState?
     let isStreaming: Bool
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 0.55)) { context in
             let runningOn = Int(context.date.timeIntervalSinceReferenceDate / 0.55).isMultiple(of: 2)
-            HStack(spacing: 4) {
-                lamp(.error, color: .red, illuminated: activeState == .error)
-                lamp(.waiting, color: .yellow, illuminated: activeState == .waiting)
-                lamp(.done, color: .green, illuminated: activeState == .done)
-                lamp(.running, color: .blue, illuminated: activeState == .running && (!isStreaming || runningOn))
-            }
-            .padding(6)
-            .background(.black.opacity(0.45), in: RoundedRectangle(cornerRadius: 12))
-            .overlay {
-                RoundedRectangle(cornerRadius: 12)
-                    .stroke(.white.opacity(0.18), lineWidth: 1)
-            }
-        }
-    }
+            let color = activeState?.color ?? .green
+            let illuminated: Bool = {
+                guard let activeState else { return false }
+                if activeState == .running && isStreaming {
+                    return runningOn
+                }
+                return true
+            }()
 
-    private func lamp(_ state: LightState, color: Color, illuminated: Bool) -> some View {
-        Circle()
-            .fill(illuminated ? color : color.opacity(0.14))
-            .frame(width: 24, height: 24)
-            .shadow(color: illuminated ? color.opacity(0.9) : .clear, radius: 6)
+            Circle()
+                .fill(illuminated ? color : color.opacity(0.14))
+                .frame(width: 24, height: 24)
+                .shadow(color: illuminated ? color.opacity(0.9) : .clear, radius: 6)
+                .padding(6)
+                .background(.black.opacity(0.45), in: RoundedRectangle(cornerRadius: 12))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 12)
+                        .stroke(.white.opacity(0.18), lineWidth: 1)
+                }
+        }
     }
 }
 
 struct MenuStatusIcon: View {
     let state: LightState?
+    let label: String
 
     var body: some View {
-        Image(systemName: state?.menuSymbol ?? "circle")
-            .symbolRenderingMode(.monochrome)
-            .foregroundStyle(state?.color ?? .green)
+        ZStack {
+            Image(systemName: state?.menuSymbol ?? "circle")
+                .symbolRenderingMode(.monochrome)
+                .foregroundStyle(state?.color ?? .green)
+
+            Text(label)
+                .font(.system(size: 8, weight: .bold))
+                .foregroundStyle(.white)
+                .shadow(color: .black.opacity(0.8), radius: 0.5)
+        }
     }
 }
 
@@ -264,7 +272,7 @@ struct SessionRowView: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
-            TrafficLightView(activeState: session.state, isStreaming: session.isStreaming)
+            StatusLightView(activeState: session.state, isStreaming: session.isStreaming)
             VStack(alignment: .leading, spacing: 2) {
                 Text(session.displayTitle)
                     .font(.caption2)
@@ -288,7 +296,7 @@ struct StatusContentView: View {
             VStack(alignment: .leading, spacing: 8) {
                 if store.displaySessions.isEmpty {
                     HStack(alignment: .top, spacing: 8) {
-                        TrafficLightView(activeState: .done, isStreaming: false)
+                        StatusLightView(activeState: .done, isStreaming: false)
                         VStack(alignment: .leading, spacing: 2) {
                             Text("Idle")
                                 .font(.caption)
@@ -442,7 +450,7 @@ struct CodexStatusLightApp: App {
             }
         } label: {
             let state = appDelegate.store.primary?.state
-            MenuStatusIcon(state: state)
+            MenuStatusIcon(state: state, label: "C")
         }
     }
 }
@@ -455,7 +463,7 @@ struct MenuStatusView: View {
         VStack(alignment: .leading, spacing: 0) {
             if store.displaySessions.isEmpty {
                 HStack(alignment: .top, spacing: 8) {
-                    TrafficLightView(activeState: .done, isStreaming: false)
+                    StatusLightView(activeState: .done, isStreaming: false)
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Idle")
                             .font(.caption)
