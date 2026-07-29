@@ -226,13 +226,35 @@ final class StatusStore: ObservableObject {
         }
     }
 
-    /// Returns `true` only when the numeric session ID looks like a live Codex
-    /// process. Non-numeric IDs (e.g. "manual") are left untouched.
+    /// Returns `true` when the session ID represents a live Codex session.
+    /// Numeric IDs are treated as PIDs and checked directly. Non-numeric IDs
+    /// (e.g. Codex UUIDs or "manual") are kept only when at least one Codex
+    /// process is still running; this prevents stale UUID sessions from
+    /// lingering after Codex exits.
     private func isCodexProcessAlive(sessionID: String) -> Bool {
-        guard let pid = pid_t(sessionID) else { return true }
-        if kill(pid, 0) != 0 { return false }
-        guard let name = processName(for: pid) else { return false }
-        return name.lowercased().contains("codex")
+        if let pid = pid_t(sessionID) {
+            if kill(pid, 0) != 0 { return false }
+            guard let name = processName(for: pid) else { return false }
+            return name.lowercased().contains("codex")
+        }
+
+        // Non-numeric session id: keep it only if any Codex process is alive.
+        return anyCodexProcessRunning()
+    }
+
+    private func anyCodexProcessRunning() -> Bool {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+        task.arguments = ["-x", "codex"]
+        task.standardOutput = FileHandle.nullDevice
+        task.standardError = FileHandle.nullDevice
+        do {
+            try task.run()
+            task.waitUntilExit()
+            return task.terminationStatus == 0
+        } catch {
+            return true
+        }
     }
 
     func refresh() {

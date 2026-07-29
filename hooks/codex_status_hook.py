@@ -143,20 +143,40 @@ def ensure_app_running() -> None:
         _log(f"ensure_app_running: lock touch error {exc}")
 
 
+def _process_command(pid: int) -> str | None:
+    """Return the full command line for pid, or None if unavailable."""
+    try:
+        result = subprocess.run(
+            ["/bin/ps", "-p", str(pid), "-o", "command="],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        return result.stdout.strip() if result.returncode == 0 else None
+    except Exception:
+        return None
+
+
 def _session_id(event: dict) -> str:
     """Return a stable session ID for this Codex invocation.
 
-    Prefer an ID provided by Codex, then an environment variable, then the parent
-    process PID. Using a PID enables the Swift app to clean up sessions whose
-    owning Codex process has exited.
+    Prefer the parent process PID when it looks like a Codex process. Using a PID
+    enables the Swift app to clean up sessions whose owning Codex process has
+    exited. Fall back to Codex's own session_id (usually a UUID) only when the
+    parent process cannot be used.
     """
+    try:
+        ppid = os.getppid()
+        cmd = _process_command(ppid)
+        if cmd and "codex" in cmd.lower():
+            return str(ppid)
+    except Exception as exc:
+        _log(f"_session_id: ppid probe error {exc}")
+
     session = event.get("session_id") or os.environ.get("CODEX_SESSION_ID")
     if session:
         return str(session)
-    try:
-        return str(os.getppid())
-    except Exception:
-        return "manual"
+    return "manual"
 
 
 def _question_header(event: dict) -> str:
