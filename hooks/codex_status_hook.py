@@ -9,11 +9,13 @@ import os
 import pathlib
 import subprocess
 import sys
+import threading
 import time
 
 
 _LAUNCH_COOLDOWN_SECONDS = 10
 _TOOL_THROTTLE_MS = 2000
+_APP_RUNNING_CACHE_TTL_SECONDS = 5
 
 # In-memory state mirrors opencode-status-light's JS plugin state machine.
 # Keys are session IDs.
@@ -21,6 +23,10 @@ _current_state: dict[str, str] = {}
 _current_streaming: dict[str, bool] = {}
 _awaiting_input: set[str] = set()
 _last_tool_time: dict[str, float] = {}
+
+# Cached app-running probe to avoid pgrep on every event.
+_app_running_cache: tuple[bool, float] | None = None
+_app_running_lock = threading.Lock()
 
 
 def install_root() -> pathlib.Path:
@@ -56,24 +62,45 @@ def _launch_lock_path() -> pathlib.Path:
     return install_root() / ".launch-lock"
 
 
+def _is_app_running() -> bool:
+    """Return True if the menu-bar app is currently running.
+
+    Result is cached for a few seconds to avoid spawning pgrep on every event.
+    """
+    global _app_running_cache
+    with _app_running_lock:
+        now = time.time()
+        if _app_running_cache is not None:
+            cached_value, cached_at = _app_running_cache
+            if now - cached_at < _APP_RUNNING_CACHE_TTL_SECONDS:
+                return cached_value
+
+        try:
+            probe = subprocess.run(
+                ["/usr/bin/pgrep", "-x", "CodexStatusLight"],
+                capture_output=True,
+                timeout=2,
+            )
+            result = probe.returncode == 0
+        except Exception as exc:
+            _log(f"_is_app_running: pgrep error {exc}")
+            result = False
+
+        _app_running_cache = (result, now)
+        return result
+
+
 def ensure_app_running() -> None:
     """Launch the menu-bar app if it is not already running.
 
     Uses a short cooldown lock to avoid repeated open(1) calls when Codex fires
-    several lifecycle events in quick succession.
+    several lifecycle events in quick succession. The running check is cached
+    for a few seconds, and open(1) is started asynchronously so the hook does
+    not block Codex.
     """
     _log("ensure_app_running: start")
-    try:
-        probe = subprocess.run(
-            ["/usr/bin/pgrep", "-x", "CodexStatusLight"],
-            capture_output=True,
-            timeout=2,
-        )
-        _log(f"ensure_app_running: pgrep returncode={probe.returncode}")
-        if probe.returncode == 0:
-            return
-    except Exception as exc:
-        _log(f"ensure_app_running: pgrep error {exc}")
+    if _is_app_running():
+        return
 
     lock = _launch_lock_path()
     try:
@@ -94,13 +121,13 @@ def ensure_app_running() -> None:
 
     _log(f"ensure_app_running: launching with {cmd}")
     try:
-        result = subprocess.run(
+        # Asynchronous launch: do not block Codex waiting for the app to start.
+        subprocess.Popen(
             cmd,
-            check=False,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            start_new_session=True,
         )
-        _log(f"ensure_app_running: open returncode={result.returncode}")
     except Exception as exc:
         _log(f"ensure_app_running: open error {exc}")
         return
@@ -108,6 +135,9 @@ def ensure_app_running() -> None:
     try:
         lock.parent.mkdir(parents=True, exist_ok=True)
         lock.touch(exist_ok=True)
+        # Mark the app as running in the cache so the next events skip pgrep.
+        with _app_running_lock:
+            _app_running_cache = (True, time.time())
         _log("ensure_app_running: lock touched")
     except Exception as exc:
         _log(f"ensure_app_running: lock touch error {exc}")
@@ -171,6 +201,7 @@ def current_state(session_id: str) -> str | None:
 
 
 def emit(state: str, message: str, event: dict, is_streaming: bool = False) -> None:
+    """Write a state update asynchronously so the Codex hook does not block."""
     command = install_root() / "bin" / "codex-status-light"
     if not command.exists():
         _log(f"emit: CLI not found at {command}")
@@ -189,8 +220,17 @@ def emit(state: str, message: str, event: dict, is_streaming: bool = False) -> N
         args.extend(["--turn", str(event["turn_id"])])
     if is_streaming:
         args.append("--streaming")
+
     _log(f"emit: state={state} session={session_id} streaming={is_streaming}")
-    subprocess.run(args, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        subprocess.Popen(
+            args,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except Exception as exc:
+        _log(f"emit: spawn error {exc}")
 
 
 def set_state(session_id: str, state: str, message: str, event: dict, is_streaming: bool = False) -> None:

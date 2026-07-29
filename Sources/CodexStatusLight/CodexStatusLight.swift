@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import CoreServices
 import Darwin
 import SwiftUI
 
@@ -111,7 +112,8 @@ final class StatusStore: ObservableObject {
     @Published private(set) var sessions: [SessionState] = []
 
     let stateDirectory: URL
-    private var timer: Timer?
+    private var cleanupTimer: Timer?
+    private var fsEventStream: FSEventStreamRef?
     private let decoder: JSONDecoder
 
     init(stateDirectory: URL = StatusStore.defaultStateDirectory) {
@@ -119,7 +121,9 @@ final class StatusStore: ObservableObject {
         decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         refresh()
-        timer = Timer.scheduledTimer(withTimeInterval: 0.75, repeats: true) { [weak self] _ in
+        startWatching()
+        // Low-frequency cleanup timer for stale sessions (older than 12h).
+        cleanupTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refresh() }
         }
     }
@@ -127,6 +131,55 @@ final class StatusStore: ObservableObject {
     static var defaultStateDirectory: URL {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".codex/status-light/sessions", isDirectory: true)
+    }
+
+    // MARK: - FSEvents-based directory watching
+    // These methods are intentionally non-isolated so they can be torn down
+    // safely. The callback hops back to the MainActor for refresh().
+
+    private func startWatching() {
+        guard fsEventStream == nil else { return }
+
+        let callback: FSEventStreamCallback = { _, clientCallBackInfo, _, _, _, _ in
+            guard let info = clientCallBackInfo else { return }
+            let store = Unmanaged<StatusStore>.fromOpaque(info).takeUnretainedValue()
+            Task { @MainActor in
+                store.refresh()
+            }
+        }
+
+        let path = stateDirectory.path as CFString
+        let paths = [path] as CFArray
+        var context = FSEventStreamContext(
+            version: 0,
+            info: Unmanaged.passUnretained(self).toOpaque(),
+            retain: nil,
+            release: nil,
+            copyDescription: nil
+        )
+
+        fsEventStream = FSEventStreamCreate(
+            kCFAllocatorDefault,
+            callback,
+            &context,
+            paths,
+            FSEventStreamEventId(kFSEventStreamEventIdSinceNow),
+            0.5,
+            FSEventStreamCreateFlags(kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagUseCFTypes)
+        )
+
+        if let stream = fsEventStream {
+            FSEventStreamSetDispatchQueue(stream, DispatchQueue.main)
+            FSEventStreamStart(stream)
+        }
+    }
+
+    private func stopWatching() {
+        guard let stream = fsEventStream else { return }
+        FSEventStreamStop(stream)
+        FSEventStreamInvalidate(stream)
+        FSEventStreamRelease(stream)
+        fsEventStream = nil
     }
 
     /// Sessions that should currently be displayed in the UI.
