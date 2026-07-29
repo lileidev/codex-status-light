@@ -122,8 +122,10 @@ final class StatusStore: ObservableObject {
         decoder.dateDecodingStrategy = .iso8601
         refresh()
         startWatching()
-        // Low-frequency cleanup timer for stale sessions (older than 12h).
-        cleanupTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
+        // Periodic cleanup timer for sessions whose owning process has exited.
+        // 30s is frequent enough to keep the UI tidy while avoiding the cost of
+        // the old 0.75s polling loop.
+        cleanupTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refresh() }
         }
     }
