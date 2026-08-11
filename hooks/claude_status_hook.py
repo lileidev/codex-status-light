@@ -1,5 +1,17 @@
 #!/usr/bin/env python3
-"""Translate Codex lifecycle hook JSON into status-light updates."""
+"""Translate Claude Code lifecycle hook JSON into status-light updates.
+
+Mirrors `codex_status_hook.py`'s state machine, but keyed to Claude Code hook
+events and their stdin payload shape. Emits through the same shared
+closely mirrors `codex_status_hook.py`'s state machine, but is keyed to Claude
+Code hook events and their stdin payload shape. It emits through the shared
+`agents-light` CLI, writing into a single state directory that the menu-bar app
+(AgentsLight) watches, so one light serves both providers.
+
+Claude Code delivers these events on stdin (`hook_event_name`):
+  SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, PermissionRequest,
+  Notification, Stop, SubagentStop, SessionEnd, PreCompact
+"""
 
 from __future__ import annotations
 
@@ -12,13 +24,11 @@ import sys
 import threading
 import time
 
-
 _LAUNCH_COOLDOWN_SECONDS = 10
 _TOOL_THROTTLE_MS = 2000
 _APP_RUNNING_CACHE_TTL_SECONDS = 5
 
-# In-memory state mirrors opencode-status-light's JS plugin state machine.
-# Keys are session IDs.
+# In-memory state, keyed by transcript/session id.
 _current_state: dict[str, str] = {}
 _current_streaming: dict[str, bool] = {}
 _awaiting_input: set[str] = set()
@@ -28,12 +38,17 @@ _last_tool_time: dict[str, float] = {}
 _app_running_cache: tuple[bool, float] | None = None
 _app_running_lock = threading.Lock()
 
+# Notification subtypes in Claude Code that indicate Claude is blocked on the
+# user (asking a question or waiting for an approval), rather than progressing.
+_WAITING_SUBTYPES = {"blocking", "question", "permission", "user-input", "request-permission", "needs-attention"}
+_ERROR_SUBTYPES = {"error"}
+
 
 def install_root() -> pathlib.Path:
     return pathlib.Path(
         os.environ.get(
-            "CODEX_STATUS_LIGHT_HOME",
-            str(pathlib.Path.home() / ".codex" / "status-light"),
+            "CLAUDE_STATUS_LIGHT_HOME",
+            str(pathlib.Path.home() / ".claude" / "status-light"),
         )
     ).expanduser()
 
@@ -63,10 +78,7 @@ def _launch_lock_path() -> pathlib.Path:
 
 
 def _is_app_running() -> bool:
-    """Return True if the menu-bar app is currently running.
-
-    Result is cached for a few seconds to avoid spawning pgrep on every event.
-    """
+    """Return True if the menu-bar app is currently running."""
     global _app_running_cache
     with _app_running_lock:
         now = time.time()
@@ -91,13 +103,7 @@ def _is_app_running() -> bool:
 
 
 def ensure_app_running() -> None:
-    """Launch the menu-bar app if it is not already running.
-
-    Uses a short cooldown lock to avoid repeated open(1) calls when Codex fires
-    several lifecycle events in quick succession. The running check is cached
-    for a few seconds, and open(1) is started asynchronously so the hook does
-    not block Codex.
-    """
+    """Launch the menu-bar app if it is not already running."""
     _log("ensure_app_running: start")
     if _is_app_running():
         return
@@ -121,7 +127,6 @@ def ensure_app_running() -> None:
 
     _log(f"ensure_app_running: launching with {cmd}")
     try:
-        # Asynchronous launch: do not block Codex waiting for the app to start.
         subprocess.Popen(
             cmd,
             stdout=subprocess.DEVNULL,
@@ -135,7 +140,6 @@ def ensure_app_running() -> None:
     try:
         lock.parent.mkdir(parents=True, exist_ok=True)
         lock.touch(exist_ok=True)
-        # Mark the app as running in the cache so the next events skip pgrep.
         with _app_running_lock:
             _app_running_cache = (True, time.time())
         _log("ensure_app_running: lock touched")
@@ -143,58 +147,36 @@ def ensure_app_running() -> None:
         _log(f"ensure_app_running: lock touch error {exc}")
 
 
-def _process_command(pid: int) -> str | None:
-    """Return the full command line for pid, or None if unavailable."""
-    try:
-        result = subprocess.run(
-            ["/bin/ps", "-p", str(pid), "-o", "command="],
-            capture_output=True,
-            text=True,
-            timeout=2,
-        )
-        return result.stdout.strip() if result.returncode == 0 else None
-    except Exception:
-        return None
-
-
 def _session_id(event: dict) -> str:
-    """Return a stable session ID for this Codex invocation.
+    """Return the transcript/session id Claude Code assigned to this run.
 
-    Prefer the parent process PID when it looks like a Codex process. Using a PID
-    enables the Swift app to clean up sessions whose owning Codex process has
-    exited. Fall back to Codex's own session_id (usually a UUID) only when the
-    parent process cannot be used.
+    Claude Code supplies a stable UUID in `session_id`. Prefer it over a PID:
+    unlike Codex, a UUID survives the owning process name mapping the Swift app
+    relies on for numeric PIDs, and Claude's UUID line is the transcript id
+    that maps cleanly to liveness when `transcript_path` is available.
     """
-    try:
-        ppid = os.getppid()
-        cmd = _process_command(ppid)
-        if cmd and "codex" in cmd.lower():
-            return str(ppid)
-    except Exception as exc:
-        _log(f"_session_id: ppid probe error {exc}")
-
-    session = event.get("session_id") or os.environ.get("CODEX_SESSION_ID")
-    if session:
-        return str(session)
-    return "manual"
+    return str(event.get("session_id") or os.environ.get("CLAUDE_SESSION_ID") or "manual")
 
 
 def _question_header(event: dict) -> str:
-    """Extract a short question header from user-input tool arguments."""
-    args = event.get("tool_args") or event.get("args") or {}
-    if not isinstance(args, dict):
-        args = {}
-    text = (
-        args.get("message")
-        or args.get("question")
-        or args.get("prompt")
-        or args.get("content")
-        or ""
-    )
+    """Extract a short header describing why the assistant is waiting."""
+    tool_input = event.get("tool_input") or event.get("input") or {}
+    if isinstance(tool_input, dict):
+        text = (
+            tool_input.get("question")
+            or tool_input.get("heading")
+            or tool_input.get("message")
+            or tool_input.get("prompt")
+            or ""
+        )
+    else:
+        text = ""
+    if not text and event.get("notification") and isinstance(event["notification"], dict):
+        text = event["notification"].get("message") or ""
     header = text.strip().splitlines()[0] if text else ""
     if len(header) > 40:
         header = header[:37] + "..."
-    return header or "Question"
+    return header or "Claude needs input"
 
 
 def _shared_root() -> pathlib.Path:
@@ -212,7 +194,12 @@ def _shared_root() -> pathlib.Path:
 
 
 def _state_dir() -> pathlib.Path:
-    """The directory the shared CLI writes to (what the app's StatusStore watches)."""
+    """The directory the shared CLI writes to.
+
+    Both the Codex and Claude hooks drive the same menu-bar app, so they must
+    share one state directory. This matches the app's StatusStore watch target
+    and the CLI's own default; an explicit override (used by tests) wins.
+    """
     return pathlib.Path(
         os.environ.get(
             "AGENTS_STATUS_LIGHT_DIR",
@@ -232,7 +219,6 @@ def _command() -> pathlib.Path:
 
 
 def current_state(session_id: str) -> str | None:
-    """Return the most recently written state for a session, if known."""
     cached = _current_state.get(session_id)
     if cached is not None:
         return cached
@@ -244,7 +230,7 @@ def current_state(session_id: str) -> str | None:
 
 
 def emit(state: str, message: str, event: dict, is_streaming: bool = False) -> None:
-    """Write a state update asynchronously so the Codex hook does not block."""
+    """Write a state update asynchronously so the Claude hook does not block."""
     command = _command()
     if not command.exists():
         _log(f"emit: CLI not found at {command}")
@@ -277,7 +263,7 @@ def emit(state: str, message: str, event: dict, is_streaming: bool = False) -> N
 
 
 def set_state(session_id: str, state: str, message: str, event: dict, is_streaming: bool = False) -> None:
-    """Write a state update, mirroring opencode-status-light's setState guards."""
+    """Write a state update, mirroring the shared state machine's guards."""
     if session_id in _awaiting_input and state not in ("waiting", "error"):
         _log(f"set_state: ignoring {state} because session {session_id} is awaiting input")
         return
@@ -296,14 +282,16 @@ def set_state(session_id: str, state: str, message: str, event: dict, is_streami
 
 
 def failed_tool(event: dict) -> bool:
-    response = event.get("tool_response") or event.get("tool_result") or {}
+    response = event.get("tool_response") or {}
     if isinstance(response, dict):
         if response.get("is_error") is True:
             return True
         if response.get("exit_code") not in (None, 0):
             return True
+        if response.get("success") is False:
+            return True
     text = json.dumps(response, ensure_ascii=False).lower()
-    return any(marker in text for marker in ('"is_error": true', '"exit_code": 1', "fatal:", "traceback"))
+    return any(marker in text for marker in ('"is_error": true', '"success": false', '"exit_code": 1', "fatal:", "traceback"))
 
 
 def main() -> int:
@@ -316,48 +304,59 @@ def main() -> int:
     name = event.get("hook_event_name", "")
     _log(f"main: event={name}")
 
-    # Make sure the status-light app is running whenever Codex is active.
-    # SessionStart is the first hook fired, so this also covers "Codex started".
     ensure_app_running()
 
     session_id = _session_id(event)
     tool = event.get("tool_name") or event.get("tool") or "tool"
 
     if name == "SessionStart":
-        set_state(session_id, "running", "Codex is working", event, is_streaming=False)
+        set_state(session_id, "running", "Claude is working", event, is_streaming=False)
     elif name == "UserPromptSubmit":
-        # A new user prompt means the user has answered a waiting question or
-        # granted a permission request. Clear the awaiting-input guard so the
-        # light transitions from yellow back to blue immediately.
+        # A new user prompt answers a waiting question or approval.
         _awaiting_input.discard(session_id)
-        # Codex has no message.part.updated event; approximate streaming by marking
-        # the running state as streaming until the first PostToolUse arrives.
-        set_state(session_id, "running", "Codex is working", event, is_streaming=True)
+        set_state(session_id, "running", "Claude is working", event, is_streaming=True)
     elif name == "PermissionRequest":
         _awaiting_input.add(session_id)
         set_state(session_id, "waiting", f"Approval needed: {tool}", event)
-    elif name == "PreToolUse" and str(tool) in {"request_user_input", "RequestUserInput"}:
-        header = _question_header(event)
-        _awaiting_input.add(session_id)
-        set_state(session_id, "waiting", f"Question: {header}", event)
+    elif name == "Notification":
+        notification = event.get("notification") or {}
+        subtype = (notification.get("subtype") if isinstance(notification, dict) else None) or event.get("subtype") or ""
+        if isinstance(subtype, str) and subtype.lower() in _WAITING_SUBTYPES:
+            _awaiting_input.add(session_id)
+            set_state(session_id, "waiting", _question_header(event), event)
+        elif isinstance(subtype, str) and subtype.lower() in _ERROR_SUBTYPES:
+            set_state(session_id, "error", f"Claude reported: {subtype}", event)
+        elif isinstance(subtype, str) and subtype.lower() == "info":
+            set_state(session_id, "running", "Claude is working", event, is_streaming=True)
+    elif name == "PreToolUse":
+        # A question-supplying tool implies Claude is waiting on the user.
+        if str(tool) in {"AskUserQuestion", "ask_user_question"}:
+            _awaiting_input.add(session_id)
+            set_state(session_id, "waiting", _question_header(event), event)
     elif name == "PostToolUse":
         if failed_tool(event):
             set_state(session_id, "error", f"Tool failed: {tool}", event)
         elif current_state(session_id) == "waiting" or session_id in _awaiting_input:
             _awaiting_input.discard(session_id)
-            set_state(session_id, "running", "Codex is working", event, is_streaming=False)
+            set_state(session_id, "running", "Claude is working", event, is_streaming=False)
         else:
             now = time.time() * 1000
             if now - _last_tool_time.get(session_id, 0) > _TOOL_THROTTLE_MS:
-                set_state(session_id, "running", "Codex is working", event, is_streaming=False)
+                set_state(session_id, "running", "Claude is working", event, is_streaming=False)
             else:
                 _log(f"PostToolUse: throttled for session {session_id}")
             _last_tool_time[session_id] = now
-    elif name == "Stop":
+    elif name in ("Stop", "SubagentStop"):
+        if not event.get("stop_hook_active"):
+            _current_streaming[session_id] = False
+            _awaiting_input.discard(session_id)
+            if current_state(session_id) != "error":
+                set_state(session_id, "done", "Claude turn completed", event)
+    elif name in ("SessionEnd", "PreCompact"):
         _current_streaming[session_id] = False
         _awaiting_input.discard(session_id)
         if current_state(session_id) != "error":
-            set_state(session_id, "done", "Codex turn completed", event)
+            set_state(session_id, "done", "Claude session ended", event)
     return 0
 
 

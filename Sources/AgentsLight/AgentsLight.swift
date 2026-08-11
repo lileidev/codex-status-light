@@ -132,7 +132,7 @@ final class StatusStore: ObservableObject {
 
     static var defaultStateDirectory: URL {
         FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".codex/status-light/sessions", isDirectory: true)
+            .appendingPathComponent(".agents-status-light/sessions", isDirectory: true)
     }
 
     // MARK: - FSEvents-based directory watching
@@ -212,7 +212,7 @@ final class StatusStore: ObservableObject {
     }
 
     /// Best-effort process name lookup for a given PID using `sysctl`.
-    /// Used to clean up session files left behind by exited Codex processes.
+    /// Used to clean up session files left behind by exited agent processes.
     private func processName(for pid: pid_t) -> String? {
         var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
         var info = kinfo_proc()
@@ -226,26 +226,45 @@ final class StatusStore: ObservableObject {
         }
     }
 
-    /// Returns `true` when the session ID represents a live Codex session.
+    /// The agent process names that own sessions the light tracks.
+    /// Both Codex and Claude Code drive the same status light.
+    private static let agentProcessNames = ["codex", "claude"]
+
+    private func isAgentProcessName(_ name: String) -> Bool {
+        Self.agentProcessNames.contains { name.lowercased().contains($0) }
+    }
+
+    /// Returns `true` when the session ID represents a live agent session.
     /// Numeric IDs are treated as PIDs and checked directly. Non-numeric IDs
-    /// (e.g. Codex UUIDs or "manual") are kept only when at least one Codex
-    /// process is still running; this prevents stale UUID sessions from
-    /// lingering after Codex exits.
-    private func isCodexProcessAlive(sessionID: String) -> Bool {
+    /// (e.g. transcript UUIDs or "manual") are kept only when at least one
+    /// supported agent process is still running; this prevents stale UUID
+    /// sessions from lingering after the owning agent exits.
+    private func isAgentProcessAlive(sessionID: String) -> Bool {
         if let pid = pid_t(sessionID) {
             if kill(pid, 0) != 0 { return false }
             guard let name = processName(for: pid) else { return false }
-            return name.lowercased().contains("codex")
+            return isAgentProcessName(name)
         }
 
-        // Non-numeric session id: keep it only if any Codex process is alive.
-        return anyCodexProcessRunning()
+        // Non-numeric session id: keep it only if any supported agent runs.
+        return anyAgentProcessRunning()
     }
 
-    private func anyCodexProcessRunning() -> Bool {
+    private func anyAgentProcessRunning() -> Bool {
+        // `pgrep -x` matches the exact process name; multiple -x args act as
+        // AND, so probe each supported agent independently and OR the results.
+        return Self.agentProcessNames.contains { doesAnyProcessExist([$0]) }
+    }
+
+    /// Returns whether `pgrep` finds at least one process named in `names`.
+    /// (pgrep with multiple -x names acts as AND across them, so call once per
+    /// name and OR the results.)
+    private func doesAnyProcessExist(_ names: [String]) -> Bool {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
-        task.arguments = ["-x", "codex"]
+        var arguments = ["-x"]
+        arguments.append(contentsOf: names)
+        task.arguments = arguments
         task.standardOutput = FileHandle.nullDevice
         task.standardError = FileHandle.nullDevice
         do {
@@ -275,8 +294,8 @@ final class StatusStore: ObservableObject {
                   let state = try? decoder.decode(SessionState.self, from: data)
             else { continue }
 
-            // Remove sessions whose Codex process has already exited.
-            if !isCodexProcessAlive(sessionID: state.sessionID) {
+            // Remove sessions whose owning agent process has already exited.
+            if !isAgentProcessAlive(sessionID: state.sessionID) {
                 try? FileManager.default.removeItem(at: url)
                 continue
             }
@@ -377,7 +396,7 @@ struct StatusContentView: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("Idle")
                                 .font(.caption)
-                            Text("Waiting for a Codex task")
+                            Text("Waiting for an agent task")
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
                         }
@@ -471,7 +490,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 defer: false
             )
             // No system title bar; the SwiftUI view provides its own close button.
-            window.title = "Codex Status Light"
+            window.title = "AgentsLight"
             window.contentView = NSHostingView(rootView: StatusContentView(store: store))
             window.level = .floating
             window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
@@ -517,7 +536,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 @main
-struct CodexStatusLightApp: App {
+struct AgentsLightApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     var body: some Scene {
@@ -527,7 +546,7 @@ struct CodexStatusLightApp: App {
             }
         } label: {
             let state = appDelegate.store.primary?.state
-            MenuStatusIcon(state: state, label: "C")
+            MenuStatusIcon(state: state, label: "A")
         }
     }
 }
@@ -544,7 +563,7 @@ struct MenuStatusView: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Idle")
                             .font(.caption)
-                        Text("Waiting for a Codex task")
+                        Text("Waiting for an agent task")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                     }

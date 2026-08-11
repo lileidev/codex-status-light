@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-@testable import CodexStatusLight
+@testable import AgentsLight
 
 @Suite @MainActor
 struct StatusStoreTests {
@@ -12,7 +12,7 @@ struct StatusStoreTests {
 
     @Test func defaultDirectory() {
         let path = StatusStore.defaultStateDirectory.path
-        #expect(path.hasSuffix(".codex/status-light/sessions"))
+        #expect(path.hasSuffix(".agents-status-light/sessions"))
     }
 
     @Test func priorityWinsOverRecency() throws {

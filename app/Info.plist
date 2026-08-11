@@ -3,11 +3,11 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleExecutable</key>
-    <string>CodexStatusLight</string>
+    <string>AgentsLight</string>
     <key>CFBundleIdentifier</key>
-    <string>com.local.codex-status-light</string>
+    <string>com.local.agents-status-light</string>
     <key>CFBundleName</key>
-    <string>Codex Status Light</string>
+    <string>AgentsLight</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>

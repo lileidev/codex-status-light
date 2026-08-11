@@ -1,23 +1,23 @@
 {
-  "description": "Drive the Codex Status Light from lifecycle events.",
+  "description": "Drive the AgentsLight menu-bar app from lifecycle events.",
   "hooks": {
     "SessionStart": [
-      {"hooks": [{"type": "command", "command": "python3 ~/.codex/status-light/hooks/codex_status_hook.py", "timeout": 5}]}
+      {"hooks": [{"type": "command", "command": "python3 ~/.agents-status-light/hooks/codex_status_hook.py", "timeout": 5}]}
     ],
     "UserPromptSubmit": [
-      {"hooks": [{"type": "command", "command": "python3 ~/.codex/status-light/hooks/codex_status_hook.py", "timeout": 5}]}
+      {"hooks": [{"type": "command", "command": "python3 ~/.agents-status-light/hooks/codex_status_hook.py", "timeout": 5}]}
     ],
     "PermissionRequest": [
-      {"matcher": "*", "hooks": [{"type": "command", "command": "python3 ~/.codex/status-light/hooks/codex_status_hook.py", "timeout": 5}]}
+      {"matcher": "*", "hooks": [{"type": "command", "command": "python3 ~/.agents-status-light/hooks/codex_status_hook.py", "timeout": 5}]}
     ],
     "PreToolUse": [
-      {"matcher": "request_user_input|RequestUserInput", "hooks": [{"type": "command", "command": "python3 ~/.codex/status-light/hooks/codex_status_hook.py", "timeout": 5}]}
+      {"matcher": "request_user_input|RequestUserInput", "hooks": [{"type": "command", "command": "python3 ~/.agents-status-light/hooks/codex_status_hook.py", "timeout": 5}]}
     ],
     "PostToolUse": [
-      {"matcher": "*", "hooks": [{"type": "command", "command": "python3 ~/.codex/status-light/hooks/codex_status_hook.py", "timeout": 5}]}
+      {"matcher": "*", "hooks": [{"type": "command", "command": "python3 ~/.agents-status-light/hooks/codex_status_hook.py", "timeout": 5}]}
     ],
     "Stop": [
-      {"hooks": [{"type": "command", "command": "python3 ~/.codex/status-light/hooks/codex_status_hook.py", "timeout": 5}]}
+      {"hooks": [{"type": "command", "command": "python3 ~/.agents-status-light/hooks/codex_status_hook.py", "timeout": 5}]}
     ]
   }
 }

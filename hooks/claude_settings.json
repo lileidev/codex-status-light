@@ -1,0 +1,23 @@
+{
+  "description": "Drive the AgentsLight menu-bar app from Claude Code lifecycle events.",
+  "hooks": {
+    "SessionStart": [
+      {"hooks": [{"type": "command", "command": "python3 ~/.agents-status-light/hooks/claude_status_hook.py", "timeout": 5}]}
+    ],
+    "UserPromptSubmit": [
+      {"hooks": [{"type": "command", "command": "python3 ~/.agents-status-light/hooks/claude_status_hook.py", "timeout": 5}]}
+    ],
+    "PermissionRequest": [
+      {"matcher": "*", "hooks": [{"type": "command", "command": "python3 ~/.agents-status-light/hooks/claude_status_hook.py", "timeout": 5}]}
+    ],
+    "Notification": [
+      {"hooks": [{"type": "command", "command": "python3 ~/.agents-status-light/hooks/claude_status_hook.py", "timeout": 5}]}
+    ],
+    "PostToolUse": [
+      {"matcher": "*", "hooks": [{"type": "command", "command": "python3 ~/.agents-status-light/hooks/claude_status_hook.py", "timeout": 5}]}
+    ],
+    "Stop": [
+      {"hooks": [{"type": "command", "command": "python3 ~/.agents-status-light/hooks/claude_status_hook.py", "timeout": 5}]}
+    ]
+  }
+}

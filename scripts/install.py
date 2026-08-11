@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Install the app support files, hooks, CLI, and personal skill safely."""
+"""Install the Codex status-light integration.
+
+Installs the shared CLI and the Codex hook under `~/.agents-status-light`, and
+merges Codex hook events into `~/.codex/hooks.json` (after a timestamped backup
+when necessary). The AgentsLight menu-bar app is launched on demand by these
+hooks, so no login LaunchAgent is needed by default.
+"""
 
 from __future__ import annotations
 
@@ -10,7 +16,6 @@ import pathlib
 import plistlib
 import shutil
 import subprocess
-
 
 HOOK_EVENTS = ("SessionStart", "UserPromptSubmit", "PermissionRequest", "PreToolUse", "PostToolUse", "Stop")
 
@@ -31,8 +36,7 @@ def absolutify_hook_commands(config: dict, python_path: pathlib.Path, hook_scrip
     """Rewrite hook commands to use absolute interpreter and script paths.
 
     Codex may run hooks with a minimal PATH that does not include `python3`,
-    and it may not expand `~` in command strings. Absolute paths avoid both
-    issues.
+    and it may not expand `~` in command strings. Absolute paths avoid both.
     """
     absolute_command = f"{python_path} {hook_script}"
     copied = json.loads(json.dumps(config))
@@ -57,10 +61,7 @@ def remove_legacy_launch_agent() -> None:
     launch_agent = pathlib.Path.home() / "Library" / "LaunchAgents" / "com.local.codex-status-light.plist"
     if not launch_agent.exists():
         return
-    subprocess.run(
-        ["launchctl", "unload", str(launch_agent)],
-        capture_output=True,
-    )
+    subprocess.run(["launchctl", "unload", str(launch_agent)], capture_output=True)
     try:
         launch_agent.unlink()
         print(f"removed_legacy_launch_agent={launch_agent}")
@@ -72,8 +73,8 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--project-root", default=str(pathlib.Path(__file__).resolve().parents[1]))
     parser.add_argument("--codex-home", default=str(pathlib.Path.home() / ".codex"))
+    parser.add_argument("--install-root", default=str(pathlib.Path.home() / ".agents-status-light"))
     parser.add_argument("--skills-home", default=str(pathlib.Path.home() / ".agents" / "skills"))
-    parser.add_argument("--app-path", default=str(pathlib.Path.home() / "Applications" / "Codex Status Light.app"))
     parser.add_argument(
         "--launch-agent",
         action="store_true",
@@ -83,23 +84,26 @@ def main() -> int:
 
     root = pathlib.Path(args.project_root).resolve()
     codex_home = pathlib.Path(args.codex_home).expanduser().resolve()
-    install = codex_home / "status-light"
+    install = pathlib.Path(args.install_root).expanduser().resolve()
     skills_home = pathlib.Path(args.skills_home).expanduser().resolve()
     install.mkdir(parents=True, exist_ok=True)
-    skills_home.mkdir(parents=True, exist_ok=True)
 
-    # Always remove the legacy login auto-start behavior. The app is now
-    # launched on-demand by the Codex command hooks.
     remove_legacy_launch_agent()
 
-    for name in ("bin", "hooks"):
-        destination = install / name
-        if destination.exists():
-            shutil.rmtree(destination)
-        shutil.copytree(root / name, destination)
+    # Shared CLI.
+    bin_dir = install / "bin"
+    if bin_dir.exists():
+        shutil.rmtree(bin_dir)
+    bin_dir.mkdir(parents=True)
+    shutil.copy2(root / "bin" / "agents-light", bin_dir / "agents-light")
+    (bin_dir / "agents-light").chmod(0o755)
+
+    # Codex hook (shared root's hooks dir, distinct filename from Claude's).
+    hooks_dir = install / "hooks"
+    hooks_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(root / "hooks" / "codex_status_hook.py", hooks_dir / "codex_status_hook.py")
+
     (install / "sessions").mkdir(exist_ok=True)
-    for executable in (install / "bin").iterdir():
-        executable.chmod(executable.stat().st_mode | 0o755)
 
     hooks_path = codex_home / "hooks.json"
     if hooks_path.exists():
@@ -133,7 +137,7 @@ def main() -> int:
         launch_agent = launch_agents / "com.local.codex-status-light.plist"
         payload = {
             "Label": "com.local.codex-status-light",
-            "ProgramArguments": ["/usr/bin/open", "-a", str(pathlib.Path(args.app_path).expanduser())],
+            "ProgramArguments": ["/usr/bin/open", "-a", "AgentsLight"],
             "RunAtLoad": True,
             "ProcessType": "Interactive",
         }

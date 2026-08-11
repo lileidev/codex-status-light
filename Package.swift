@@ -2,13 +2,13 @@
 import PackageDescription
 
 let package = Package(
-    name: "CodexStatusLight",
+    name: "AgentsLight",
     platforms: [.macOS(.v14)],
     products: [
-        .executable(name: "CodexStatusLight", targets: ["CodexStatusLight"]),
+        .executable(name: "AgentsLight", targets: ["AgentsLight"]),
     ],
     targets: [
-        .executableTarget(name: "CodexStatusLight"),
-        .testTarget(name: "CodexStatusLightTests", dependencies: ["CodexStatusLight"]),
+        .executableTarget(name: "AgentsLight"),
+        .testTarget(name: "AgentsLightTests", dependencies: ["AgentsLight"]),
     ]
 )
