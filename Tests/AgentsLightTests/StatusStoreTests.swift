@@ -215,10 +215,11 @@ struct StatusStoreTests {
         #expect(store.sessions.map { $0.sessionID }.contains("dir-b-session"))
     }
 
-    @Test func defaultDirectoriesIncludeOpenCode() {
+    @Test func defaultDirectoriesAreTheSingleSharedRoot() {
         let paths = StatusStore.defaultStateDirectories.map { $0.path }
-        #expect(paths.contains { $0.hasSuffix(".agents-status-light/sessions") })
-        #expect(paths.contains { $0.hasSuffix(".opencode/status-light/sessions") })
+        #expect(paths.count == 1)
+        #expect(paths[0].hasSuffix(".agents-status-light/sessions"),
+                "all agents now write the shared root; no per-agent legacy dir is watched")
     }
 
     @Test func primaryKeepsErrorSessionVisibleUntilTwelveHourCleanup() throws {

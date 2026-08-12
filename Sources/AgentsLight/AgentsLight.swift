@@ -168,14 +168,11 @@ final class StatusStore: ObservableObject {
             .appendingPathComponent(".agents-status-light/sessions", isDirectory: true)
     }
 
-    /// The directories watched by default: the shared root plus agent-specific
-    /// legacy roots (OpenCode today; Codex/Claude write into the shared root).
+    /// The directories watched by default. All three agents (Claude, Codex,
+    /// OpenCode) now write into the single shared root, so this is just that
+    /// one directory.
     static var defaultStateDirectories: [URL] {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        return [
-            defaultStateDirectory,
-            home.appendingPathComponent(".opencode/status-light/sessions", isDirectory: true),
-        ]
+        [defaultStateDirectory]
     }
 
     // MARK: - FSEvents-based directory watching
