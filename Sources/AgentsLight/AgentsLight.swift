@@ -269,10 +269,6 @@ final class StatusStore: ObservableObject {
     /// Codex, Claude Code, and OpenCode all drive the same status light.
     private static let agentProcessNames = ["codex", "claude", "opencode"]
 
-    private func isAgentProcessName(_ name: String) -> Bool {
-        Self.agentProcessNames.contains { name.lowercased().contains($0) }
-    }
-
     /// Returns `true` when the session ID represents a live agent session.
     /// Numeric IDs are treated as PIDs and checked directly. Non-numeric IDs
     /// (e.g. transcript UUIDs or "manual") are kept only when at least one
@@ -280,9 +276,14 @@ final class StatusStore: ObservableObject {
     /// sessions from lingering after the owning agent exits.
     private func isAgentProcessAlive(sessionID: String) -> Bool {
         if let pid = pid_t(sessionID) {
-            if kill(pid, 0) != 0 { return false }
-            guard let name = processName(for: pid) else { return false }
-            return isAgentProcessName(name)
+            // A session file is only ever created by an agent hook using the
+            // agent's own PID, so liveness is simply "is that process alive".
+            // We must NOT require the process name here: the Claude Code
+            // launcher exposes a version string (e.g. "2.1.227") as its
+            // p_comm rather than "claude", so a name check would wrongly mark
+            // every open Claude terminal as dead. The agent row icon is still
+            // resolved separately by agent(for:), which falls back to claude.
+            return kill(pid, 0) == 0
         }
 
         // Non-numeric session id: keep it only if any supported agent runs.
