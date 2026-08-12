@@ -38,6 +38,32 @@ enum LightState: String, Codable, CaseIterable {
     }
 }
 
+/// The coding-agent a session belongs to, shown as a small indicator in front
+/// of each row so lives from different terminals stay distinguishable.
+enum Agent: String, CaseIterable, Codable {
+    case claude
+    case codex
+    case opencode
+
+    /// The menu-bar/reference label used in test assertions.
+    /// A distinct (if imperfect) SF Symbol per agent keeps the rows readable.
+    var symbol: String {
+        switch self {
+        case .claude: "sparkles"
+        case .codex: "chevron.left.forwardslash.chevron.right"
+        case .opencode: "terminal"
+        }
+    }
+
+    var tint: Color {
+        switch self {
+        case .claude: .orange
+        case .codex: .blue
+        case .opencode: .green
+        }
+    }
+}
+
 struct SessionState: Codable, Identifiable, Equatable {
     let sessionID: String
     var state: LightState
@@ -47,6 +73,8 @@ struct SessionState: Codable, Identifiable, Equatable {
     var turnID: String?
     var source: String?
     var isStreaming: Bool = false
+    /// Resolved by StatusStore.refresh(); not persisted in the state file.
+    var agent: Agent?
 
     var id: String { sessionID }
 
@@ -79,6 +107,7 @@ struct SessionState: Codable, Identifiable, Equatable {
         self.turnID = turnID
         self.source = source
         self.isStreaming = isStreaming
+        agent = nil
     }
 
     init(from decoder: Decoder) throws {
@@ -91,6 +120,7 @@ struct SessionState: Codable, Identifiable, Equatable {
         turnID = try container.decodeIfPresent(String.self, forKey: .turnID)
         source = try container.decodeIfPresent(String.self, forKey: .source)
         isStreaming = try container.decodeIfPresent(Bool.self, forKey: .isStreaming) ?? false
+        agent = nil
     }
 
     /// A compact label for the session: "<folder> <HHmmss>".
@@ -288,6 +318,19 @@ final class StatusStore: ObservableObject {
         }
     }
 
+    /// Maps a session ID to the agent that owns it, so each row can be tagged.
+    /// - Numeric IDs are PIDs (Codex and OpenCode): resolve the live process
+    ///   name to pick the agent.
+    /// - Non-numeric IDs are Claude Code transcript UUIDs.
+    private func agent(for sessionID: String) -> Agent? {
+        guard let pid = pid_t(sessionID), let name = processName(for: pid) else {
+            return .claude  // UUID transcript belongs to Claude Code
+        }
+        if name.lowercased().contains("codex") { return .codex }
+        if name.lowercased().contains("opencode") { return .opencode }
+        return .claude
+    }
+
     func refresh() {
         let now = Date()
 
@@ -303,8 +346,12 @@ final class StatusStore: ObservableObject {
 
             for url in urls where url.pathExtension == "json" {
                 guard let data = try? Data(contentsOf: url),
-                      let state = try? decoder.decode(SessionState.self, from: data)
+                      var state = try? decoder.decode(SessionState.self, from: data)
                 else { continue }
+
+                // Tag the row with its owning agent so mixed lives stay
+                // distinguishable in the shared window.
+                state.agent = agent(for: state.sessionID)
 
                 // Remove sessions whose owning agent process has already exited.
                 if !isAgentProcessAlive(sessionID: state.sessionID) {
@@ -381,6 +428,7 @@ struct SessionRowView: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
+            AgentIndicator(agent: session.agent)
             StatusLightView(activeState: session.state, isStreaming: session.isStreaming)
             VStack(alignment: .leading, spacing: 2) {
                 Text(session.displayTitle)
@@ -393,6 +441,20 @@ struct SessionRowView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
+    }
+}
+
+/// A small glyph marking which agent produced a session. Falls back to a
+/// neutral code symbol when the agent is unknown.
+struct AgentIndicator: View {
+    let agent: Agent?
+
+    var body: some View {
+        Image(systemName: agent?.symbol ?? "circle")
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(agent?.tint ?? .secondary)
+            .frame(width: 14, height: 14)
+            .help(agent?.rawValue ?? "Unknown agent")
     }
 }
 

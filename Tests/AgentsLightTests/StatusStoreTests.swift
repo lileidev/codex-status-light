@@ -5,6 +5,13 @@ import Testing
 @Suite @MainActor
 struct StatusStoreTests {
 
+    @Test func everyAgentHasStableDistinctIcon() {
+        #expect(Agent.allCases.count == 3)
+        #expect(Set(Agent.allCases.map { $0.symbol }).count == Agent.allCases.count,
+                "each agent gets its own icon so rows stay distinguishable")
+        #expect(Set(Agent.allCases.map { $0.rawValue }).count == 3)
+    }
+
     @Test func everyStateUsesStableFilledMenuIndicator() {
         #expect(LightState.allCases.count == 4)
         #expect(LightState.allCases.allSatisfy { $0.menuSymbol == "circle.fill" })
