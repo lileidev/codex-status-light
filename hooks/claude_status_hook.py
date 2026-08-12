@@ -147,15 +147,45 @@ def ensure_app_running() -> None:
         _log(f"ensure_app_running: lock touch error {exc}")
 
 
-def _session_id(event: dict) -> str:
-    """Return the transcript/session id Claude Code assigned to this run.
+def _parent_process_name() -> str | None:
+    """Return the executable name of the parent process, e.g. "claude".
 
-    Claude Code supplies a stable UUID in `session_id`. Prefer it over a PID:
-    unlike Codex, a UUID survives the owning process name mapping the Swift app
-    relies on for numeric PIDs, and Claude's UUID line is the transcript id
-    that maps cleanly to liveness when `transcript_path` is available.
+    Uses `ps -o comm=` (just the executable name), not the full command line,
+    so a hook run under Claude Code never mistakes the `~/.claude` path in a
+    shell command for an actual Claude Code process.
     """
-    return str(event.get("session_id") or os.environ.get("CLAUDE_SESSION_ID") or "manual")
+    try:
+        result = subprocess.run(
+            ["/bin/ps", "-p", str(os.getppid()), "-o", "comm="],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        return result.stdout.strip() if result.returncode == 0 else None
+    except Exception:
+        return None
+
+
+def _session_id(event: dict) -> str:
+    """Return a stable session ID for this Claude Code invocation.
+
+    Prefer the parent process PID when the parent is actually a Claude Code
+    process. Using a PID lets the Swift app clean up sessions whose owning
+    Claude Code process has exited (the same mechanism Codex uses), instead of
+    leaving every transcript UUID to linger while any agent runs. Fall back to
+    the transcript UUID when the parent is not Claude.
+    """
+    try:
+        name = _parent_process_name()
+        if name == "claude":
+            return str(os.getppid())
+    except Exception as exc:
+        _log(f"_session_id: ppid probe error {exc}")
+
+    session = event.get("session_id") or os.environ.get("CLAUDE_SESSION_ID")
+    if session:
+        return str(session)
+    return "manual"
 
 
 def _question_header(event: dict) -> str:

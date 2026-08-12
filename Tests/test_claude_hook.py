@@ -118,6 +118,22 @@ class ClaudeStatusHookTests(unittest.TestCase):
         self.assertFalse(module.failed_tool({"tool_response": {"is_error": False}}))
         self.assertFalse(module.failed_tool({"tool_response": {"exit_code": 0}}))
 
+    def test_session_id_prefers_pid_when_parent_is_claude(self):
+        import unittest.mock
+        spec = importlib.util.spec_from_file_location("claude_hook2", HOOK)
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(module)
+
+        # Parent is a Claude process -> use its PID so the app can track liveness.
+        with unittest.mock.patch.object(module, "_parent_process_name", return_value="claude"), \
+             unittest.mock.patch.object(module.os, "getppid", return_value=4242):
+            self.assertEqual(module._session_id({"session_id": "transcript-abc"}), "4242")
+
+        # Parent is not Claude (e.g. a shell) -> fall back to the transcript UUID.
+        with unittest.mock.patch.object(module, "_parent_process_name", return_value="/bin/zsh"):
+            self.assertEqual(module._session_id({"session_id": "transcript-abc"}), "transcript-abc")
+
 
 if __name__ == "__main__":
     unittest.main()

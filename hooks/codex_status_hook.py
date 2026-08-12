@@ -143,11 +143,16 @@ def ensure_app_running() -> None:
         _log(f"ensure_app_running: lock touch error {exc}")
 
 
-def _process_command(pid: int) -> str | None:
-    """Return the full command line for pid, or None if unavailable."""
+def _parent_process_name() -> str | None:
+    """Return the executable name of the parent process, e.g. "codex".
+
+    Uses `ps -o comm=` (just the executable name), not the full command line,
+    so a hook never mistakes a `~/.codex` path in a shell command for an actual
+    Codex process.
+    """
     try:
         result = subprocess.run(
-            ["/bin/ps", "-p", str(pid), "-o", "command="],
+            ["/bin/ps", "-p", str(os.getppid()), "-o", "comm="],
             capture_output=True,
             text=True,
             timeout=2,
@@ -160,16 +165,14 @@ def _process_command(pid: int) -> str | None:
 def _session_id(event: dict) -> str:
     """Return a stable session ID for this Codex invocation.
 
-    Prefer the parent process PID when it looks like a Codex process. Using a PID
-    enables the Swift app to clean up sessions whose owning Codex process has
-    exited. Fall back to Codex's own session_id (usually a UUID) only when the
-    parent process cannot be used.
+    Prefer the parent process PID when the parent is actually a Codex process.
+    Using a PID enables the Swift app to clean up sessions whose owning Codex
+    process has exited. Fall back to Codex's own session_id (usually a UUID)
+    only when the parent process is not a Codex process.
     """
     try:
-        ppid = os.getppid()
-        cmd = _process_command(ppid)
-        if cmd and "codex" in cmd.lower():
-            return str(ppid)
+        if _parent_process_name() == "codex":
+            return str(os.getppid())
     except Exception as exc:
         _log(f"_session_id: ppid probe error {exc}")
 
