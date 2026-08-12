@@ -47,7 +47,7 @@ struct StatusStoreTests {
             try data.write(to: url)
         }
 
-        let store = StatusStore(stateDirectory: directory)
+        let store = StatusStore(stateDirectories: [directory])
         store.refresh()
 
         #expect(store.sessions.count == 3)
@@ -85,7 +85,7 @@ struct StatusStoreTests {
             try data.write(to: url)
         }
 
-        let store = StatusStore(stateDirectory: directory)
+        let store = StatusStore(stateDirectories: [directory])
         store.refresh()
 
         #expect(store.sessions.count == 2)
@@ -124,7 +124,7 @@ struct StatusStoreTests {
             try data.write(to: url)
         }
 
-        let store = StatusStore(stateDirectory: directory)
+        let store = StatusStore(stateDirectories: [directory])
         store.refresh()
 
         #expect(store.sessions.count == 3)
@@ -163,13 +163,55 @@ struct StatusStoreTests {
             try data.write(to: url)
         }
 
-        let store = StatusStore(stateDirectory: directory)
+        let store = StatusStore(stateDirectories: [directory])
         store.refresh()
 
         #expect(store.displaySessions.count == 3)
         #expect(store.displaySessions[0].sessionID == "old-error", "error should rank first regardless of age")
         #expect(store.displaySessions[1].sessionID == "recent-done", "more recent done should come next")
         #expect(store.displaySessions[2].sessionID == "old-done")
+    }
+
+    @Test func aggregatesSessionsAcrossMultipleDirectories() throws {
+        let dirA = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let dirB = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: dirA, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: dirB, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: dirA)
+            try? FileManager.default.removeItem(at: dirB)
+        }
+
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let now = Date()
+
+        // One session in each watched directory; both must appear.
+        let inA = SessionState(
+            sessionID: "dir-a-session", state: .running, message: "a", cwd: "/tmp",
+            updatedAt: now, turnID: nil, source: "test", isStreaming: false
+        )
+        let inB = SessionState(
+            sessionID: "dir-b-session", state: .done, message: "b", cwd: "/tmp",
+            updatedAt: now, turnID: nil, source: "test", isStreaming: false
+        )
+        try encoder.encode(inA).write(to: dirA.appendingPathComponent("dir-a-session.json"))
+        try encoder.encode(inB).write(to: dirB.appendingPathComponent("dir-b-session.json"))
+
+        let store = StatusStore(stateDirectories: [dirA, dirB])
+        store.refresh()
+
+        #expect(store.sessions.count == 2)
+        #expect(store.sessions.map { $0.sessionID }.contains("dir-a-session"))
+        #expect(store.sessions.map { $0.sessionID }.contains("dir-b-session"))
+    }
+
+    @Test func defaultDirectoriesIncludeOpenCode() {
+        let paths = StatusStore.defaultStateDirectories.map { $0.path }
+        #expect(paths.contains { $0.hasSuffix(".agents-status-light/sessions") })
+        #expect(paths.contains { $0.hasSuffix(".opencode/status-light/sessions") })
     }
 
     @Test func primaryKeepsErrorSessionVisibleUntilTwelveHourCleanup() throws {
@@ -196,7 +238,7 @@ struct StatusStoreTests {
         let url = directory.appendingPathComponent("old-error.json")
         try data.write(to: url)
 
-        let store = StatusStore(stateDirectory: directory)
+        let store = StatusStore(stateDirectories: [directory])
         store.refresh()
 
         #expect(store.primary?.state == .error, "error session should stay visible until the 12h stale cleanup")
@@ -208,7 +250,7 @@ struct StatusStoreTests {
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
 
-        let store = StatusStore(stateDirectory: directory)
+        let store = StatusStore(stateDirectories: [directory])
         #expect(store.sessions.isEmpty)
         #expect(store.primary == nil, "no sessions returns nil; UI defaults to done/green")
     }
@@ -219,7 +261,7 @@ struct StatusStoreTests {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
 
-        let store = StatusStore(stateDirectory: directory)
+        let store = StatusStore(stateDirectories: [directory])
 
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
@@ -251,7 +293,7 @@ struct StatusStoreTests {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
 
-        let store = StatusStore(stateDirectory: directory)
+        let store = StatusStore(stateDirectories: [directory])
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
 
@@ -281,7 +323,7 @@ struct StatusStoreTests {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
 
-        let store = StatusStore(stateDirectory: directory)
+        let store = StatusStore(stateDirectories: [directory])
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
 
@@ -311,7 +353,7 @@ struct StatusStoreTests {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
 
-        let store = StatusStore(stateDirectory: directory)
+        let store = StatusStore(stateDirectories: [directory])
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
 
@@ -340,7 +382,7 @@ struct StatusStoreTests {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
 
-        let store = StatusStore(stateDirectory: directory)
+        let store = StatusStore(stateDirectories: [directory])
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
 
@@ -376,7 +418,7 @@ struct StatusStoreTests {
         let url = directory.appendingPathComponent("legacy.json")
         try legacy.write(to: url, atomically: true, encoding: .utf8)
 
-        let store = StatusStore(stateDirectory: directory)
+        let store = StatusStore(stateDirectories: [directory])
         store.refresh()
 
         #expect(store.sessions.count == 1)
@@ -405,7 +447,7 @@ struct StatusStoreTests {
         let url = directory.appendingPathComponent("streaming.json")
         try data.write(to: url)
 
-        let store = StatusStore(stateDirectory: directory)
+        let store = StatusStore(stateDirectories: [directory])
         store.refresh()
 
         #expect(store.primary?.isStreaming == true)

@@ -111,13 +111,16 @@ private let staleSessionThreshold: TimeInterval = 43_200  // 12 hours
 final class StatusStore: ObservableObject {
     @Published private(set) var sessions: [SessionState] = []
 
-    let stateDirectory: URL
+    /// All directories the light watches. Currently the shared AgentsLight
+    /// directory plus the legacy OpenCode directory, so one app surfaces
+    /// Claude, Codex, and OpenCode from their per-agent state files.
+    let stateDirectories: [URL]
     private var cleanupTimer: Timer?
     private var fsEventStream: FSEventStreamRef?
     private let decoder: JSONDecoder
 
-    init(stateDirectory: URL = StatusStore.defaultStateDirectory) {
-        self.stateDirectory = stateDirectory
+    init(stateDirectories: [URL] = StatusStore.defaultStateDirectories) {
+        self.stateDirectories = stateDirectories
         decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         refresh()
@@ -135,6 +138,16 @@ final class StatusStore: ObservableObject {
             .appendingPathComponent(".agents-status-light/sessions", isDirectory: true)
     }
 
+    /// The directories watched by default: the shared root plus agent-specific
+    /// legacy roots (OpenCode today; Codex/Claude write into the shared root).
+    static var defaultStateDirectories: [URL] {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        return [
+            defaultStateDirectory,
+            home.appendingPathComponent(".opencode/status-light/sessions", isDirectory: true),
+        ]
+    }
+
     // MARK: - FSEvents-based directory watching
     // These methods are intentionally non-isolated so they can be torn down
     // safely. The callback hops back to the MainActor for refresh().
@@ -150,8 +163,7 @@ final class StatusStore: ObservableObject {
             }
         }
 
-        let path = stateDirectory.path as CFString
-        let paths = [path] as CFArray
+        let paths = stateDirectories.map { $0.path as CFString } as CFArray
         var context = FSEventStreamContext(
             version: 0,
             info: Unmanaged.passUnretained(self).toOpaque(),
@@ -227,8 +239,8 @@ final class StatusStore: ObservableObject {
     }
 
     /// The agent process names that own sessions the light tracks.
-    /// Both Codex and Claude Code drive the same status light.
-    private static let agentProcessNames = ["codex", "claude"]
+    /// Codex, Claude Code, and OpenCode all drive the same status light.
+    private static let agentProcessNames = ["codex", "claude", "opencode"]
 
     private func isAgentProcessName(_ name: String) -> Bool {
         Self.agentProcessNames.contains { name.lowercased().contains($0) }
@@ -277,35 +289,36 @@ final class StatusStore: ObservableObject {
     }
 
     func refresh() {
-        guard let urls = try? FileManager.default.contentsOfDirectory(
-            at: stateDirectory,
-            includingPropertiesForKeys: nil,
-            options: [.skipsHiddenFiles]
-        ) else {
-            sessions = []
-            return
-        }
-
         let now = Date()
 
         var pairs: [(state: SessionState, url: URL)] = []
-        for url in urls where url.pathExtension == "json" {
-            guard let data = try? Data(contentsOf: url),
-                  let state = try? decoder.decode(SessionState.self, from: data)
-            else { continue }
-
-            // Remove sessions whose owning agent process has already exited.
-            if !isAgentProcessAlive(sessionID: state.sessionID) {
-                try? FileManager.default.removeItem(at: url)
+        for directory in stateDirectories {
+            guard let urls = try? FileManager.default.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles]
+            ) else {
                 continue
             }
 
-            pairs.append((state, url))
+            for url in urls where url.pathExtension == "json" {
+                guard let data = try? Data(contentsOf: url),
+                      let state = try? decoder.decode(SessionState.self, from: data)
+                else { continue }
+
+                // Remove sessions whose owning agent process has already exited.
+                if !isAgentProcessAlive(sessionID: state.sessionID) {
+                    try? FileManager.default.removeItem(at: url)
+                    continue
+                }
+
+                pairs.append((state, url))
+            }
         }
 
         sessions = pairs.map { $0.state }.sorted { $0.updatedAt > $1.updatedAt }
 
-        // Clean up very old session files so the directory does not grow forever.
+        // Clean up very old session files so the directories do not grow forever.
         for (state, url) in pairs {
             if now.timeIntervalSince(state.updatedAt) > staleSessionThreshold {
                 try? FileManager.default.removeItem(at: url)
