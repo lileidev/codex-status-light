@@ -1,7 +1,8 @@
 # AgentsLight
 
 A macOS menu-bar and floating status light for coding-agent task state. One
-light serves **Claude Code** and **Codex** (OpenAI) from shared state.
+light serves **Claude Code**, **Codex** (OpenAI), **OpenCode**, and the
+**DeepSeek Harness (DSH)** from shared state.
 
 | State | Color | Meaning |
 |---|---|---|
@@ -32,8 +33,8 @@ app launches.
 ## Install agent integrations
 
 The shared CLI, state directory, and hooks live under `~/.agents-status-light/`.
-Each agent's installer adds its own hook and registers it, so one app serves
-every agent.
+Each agent's installer adds its own integration (a command hook for Claude/Codex,
+an OpenCode plugin, or a DSH session-log watcher), so one app serves every agent.
 
 ### Claude Code
 
@@ -64,6 +65,44 @@ python3 scripts/install.py --launch-agent
 After installation, restart the agent and use `/hooks` (Claude) or `/hooks`
 (Codex) to review and trust the new command hooks. Hooks automatically track
 turn start, permission requests, tool errors, and turn completion.
+
+### DeepSeek Harness (DSH)
+
+DSH has no command hook like Codex/Claude, so instead this project watches DSH's
+durable session logs directly. DSH persists every session as a zstd-compressed
+JSONL file (`$DSH_HOME/sessions/<workspace>/<session>/session.jsonl.zstd`);
+`hooks/dsh_status_light.py` tails those logs and writes one status file per DSH
+session into the shared state directory, so each DSH session shows up as its own
+row (tagged with DeepSeek's blue whale icon, rendered from
+`Sources/AgentsLight/Resources/dsh-whale.png`). No modification of DSH itself is
+required.
+
+Agent rows with an official brand mark display their real logo instead of an SF
+Symbol: Codex rows use the OpenAI blossom (`Sources/AgentsLight/Resources/openai-logo.png`)
+and DSH rows use DeepSeek's whale (`Sources/AgentsLight/Resources/dsh-whale.png`).
+
+```sh
+python3 scripts/install_dsh.py           # install + LaunchAgent watcher
+python3 scripts/install_dsh.py --no-launch   # install only; run the watcher by hand
+```
+
+The login LaunchAgent keeps the watcher running; to run it manually:
+
+```sh
+~/.agents-status-light/hooks/dsh_status_light.py
+```
+
+State mapping: a DSH `user/message`, `turn/start`, `step/start`, or `tool/call`
+turns the light blue (blinking while streaming); an unanswered
+`ask_user_question`/`request_user_input` tool call or a pending sandbox approval
+(`approval/asked` with no matching `approval/decided`) turns it yellow; a
+`turn/end` reported with an error/blocked reason turns it red; a `turn/end` with
+a completed reason, or a turn that goes quiet, turns it green.
+
+Only **recently active** DSH sessions are shown: a DSH session whose log has not
+been written for `DSH_ACTIVE_WINDOW_SECONDS` seconds (default 600, i.e. 10
+minutes) has its status row removed, so historical DSH sessions don't clutter the
+light — only the sessions you're actually working in stay visible.
 
 ## Manual CLI
 

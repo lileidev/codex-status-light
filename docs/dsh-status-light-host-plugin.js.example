@@ -1,0 +1,110 @@
+// dsh-status-light — host-side Cordis plugin (object form { name, inject, apply })
+// Writes a JSON status file and spawns an OS CLI whenever the DSH session
+// lifecycle state changes (busy/running, waiting, error, idle/done).
+
+import { writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import { runNativeCommand } from '@deepseek-ai/dsh-native-command';
+
+export const name = 'status-light';
+// Wait for the session store and agent loop services before loading.
+export const inject = ['sessions', 'agent'];
+
+// ---------------------------------------------------------------------------
+// State bus: flush a small JSON file and fire the desktop CLI helper.
+// ---------------------------------------------------------------------------
+function statusPath(config) {
+  if (config?.statusFile) return config.statusFile;
+  return process.env.DSH_STATUS_FILE ?? join(homedir(), '.dsh-status.json');
+}
+
+let latest = { state: 'idle' };
+
+function setState(state, config, ctx) {
+  latest = { at: Date.now(), ...state };
+  try {
+    writeFileSync(statusPath(config), JSON.stringify(latest, null, 2));
+  } catch (error) {
+    console.error('status-light: unable to write status file', error);
+  }
+  const helper = config?.helper ?? '/usr/local/bin/agents-light';
+  // The sanctioned host spawn: no-shell execFile runner. Plugin code is NOT
+  // sandboxed (the sandbox gates only the model's bash/subprocess tool).
+  runNativeCommand(helper, [state.state, state.session ?? ''], new AbortController().signal)
+    .catch((error) => console.error('status-light: helper spawn failed', error));
+}
+
+// ---------------------------------------------------------------------------
+// Lifecycle → 4 states: running | waiting | error | done / idle
+// ---------------------------------------------------------------------------
+export function apply(ctx, config) {
+  const cwdOf = (session) => session?.header?.cwd ?? process.cwd();
+
+  // idle ⇄ running (also 'done' when the agent goes idle after work)
+  ctx.on('agent/status', ({ agent }) => {
+    const running = agent.status === 'running';
+    setState(
+      { state: running ? (agent.unameText ? 'waiting' : 'running') : 'done',
+        session: agent.id, cwd: agent.session?.header?.cwd ?? process.cwd() },
+      config, ctx,
+    );
+  });
+
+  // a turn ended → 'done', or 'error' when the turn reason is an error
+  ctx.on('session/event', (session, event) => {
+    if (event.type !== 'turn/end') return;
+    const reason = event.data.reason;
+    const failed = reason && reason.kind === 'error';
+    setState(
+      { state: failed ? 'error' : 'done',
+        session: session.id, cwd: cwdOf(session) },
+      config, ctx,
+    );
+  });
+
+  // a tool started / finished (any tool, incl. ask_user_question and bash)
+  ctx.on('session/event', (session, event) => {
+    if (event.type === 'tool/call') {
+      setState(
+        { state: 'busy', tool: event.data.name, session: session.id, cwd: cwdOf(session) },
+        config, ctx,
+      );
+    } else if (event.type === 'tool/result') {
+      const isError = event.data.error ||
+        (event.data.message?.content?.[0]?.isError ?? false);
+      setState(
+        { state: isError ? 'error' : 'busy', tool: event.data.name,
+          session: session.id, cwd: cwdOf(session) },
+        config, ctx,
+      );
+    }
+  });
+
+  // permission / approval waiting (log-only session events from dsh-user-approval)
+  ctx.on('session/event', (session, event) => {
+    if (event.type === 'approval/asked') {
+      setState(
+        { state: 'waiting', reason: event.data.toolName,
+          session: session.id, cwd: cwdOf(session) },
+        config, ctx,
+      );
+    } else if (event.type === 'approval/decided') {
+      setState(
+        { state: 'busy', session: session.id, cwd: cwdOf(session) },
+        config, ctx,
+      );
+    }
+  });
+
+  // session disposed → final 'done'
+  ctx.on('session/disposed', (session) => {
+    setState({ state: 'done', session: session.id, cwd: cwdOf(session) }, config, ctx);
+  });
+
+  // initial idle snapshot, and clear on plugin teardown (ctx.effect disposer)
+  setState({ state: 'idle' }, config, ctx);
+  ctx.effect(() => () => setState({ state: 'idle' }, config, ctx), 'status-light: reset on unload');
+}
+
+export default { name, inject, apply };
