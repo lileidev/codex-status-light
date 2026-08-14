@@ -78,7 +78,8 @@ row (tagged with DeepSeek's blue whale icon, rendered from
 required.
 
 Agent rows with an official brand mark display their real logo instead of an SF
-Symbol: Codex rows use the OpenAI blossom (`Sources/AgentsLight/Resources/openai-logo.png`)
+Symbol: Claude rows use the Claude app icon (`Sources/AgentsLight/Resources/claude-logo.png`),
+Codex rows use the OpenAI blossom (`Sources/AgentsLight/Resources/openai-logo.png`),
 and DSH rows use DeepSeek's whale (`Sources/AgentsLight/Resources/dsh-whale.png`).
 
 ```sh

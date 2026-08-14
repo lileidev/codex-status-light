@@ -74,9 +74,10 @@ enum Agent: String, CaseIterable, Codable {
     /// icon (Codex → OpenAI blossom, DSH → DeepSeek whale).
     var imageResource: String? {
         switch self {
-        case .dsh: "dsh-whale"
+        case .claude: "claude-logo"
         case .codex: "openai-logo"
-        case .claude, .opencode: nil
+        case .dsh: "dsh-whale"
+        case .opencode: nil
         }
     }
 }
@@ -511,8 +512,9 @@ struct AgentIndicator: View {
                let nsImage = NSImage(contentsOfFile: path) {
                 Image(nsImage: nsImage)
                     .resizable()
-                    .scaledToFit()
+                    .scaledToFill()
                     .frame(width: 14, height: 14)
+                    .clipShape(RoundedRectangle(cornerRadius: 3, style: .continuous))
             } else {
                 Image(systemName: agent?.symbol ?? "circle")
                     .font(.system(size: 11, weight: .semibold))
