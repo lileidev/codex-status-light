@@ -12,6 +12,9 @@ mkdir -p "$destination/Contents/MacOS"
 mkdir -p "$destination/Contents/Resources"
 cp "$binary_path" "$destination/Contents/MacOS/AgentsLight"
 cp "$project_root/app/Info.plist" "$destination/Contents/Info.plist"
+# Brand logos rendered as agent glyphs (DeepSeek whale, OpenAI mark).
+cp "$project_root/Sources/AgentsLight/Resources/dsh-whale.png" "$destination/Contents/Resources/dsh-whale.png"
+cp "$project_root/Sources/AgentsLight/Resources/openai-logo.png" "$destination/Contents/Resources/openai-logo.png"
 
 ENTITLEMENTS="$project_root/app/AgentsLight.entitlements"
 SIGNING_IDENTITY="${SIGNING_IDENTITY:--}"

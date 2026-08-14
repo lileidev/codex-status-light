@@ -5,11 +5,89 @@ import Testing
 @Suite @MainActor
 struct StatusStoreTests {
 
+    @Test func dshSourceSessionIsTaggedAndKeptAlive() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let store = StatusStore(stateDirectories: [directory])
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+
+        // A DSH session is identified by a UUID (non-numeric) and source "dsh".
+        let dshSession = SessionState(
+            sessionID: "session-114d58a2-8aac-4028-836b-59e1b81d1f04",
+            state: .running,
+            message: "DSH is working",
+            cwd: "/tmp/dsh-project",
+            updatedAt: Date(),
+            turnID: nil,
+            source: "dsh",
+            isStreaming: true
+        )
+        let data = try encoder.encode(dshSession)
+        let url = directory.appendingPathComponent("session-dsh.json")
+        try data.write(to: url)
+
+        store.refresh()
+
+        guard let loaded = store.sessions.first else {
+            Issue.record("expected one DSH session to survive refresh")
+            return
+        }
+        #expect(loaded.sessionID == dshSession.sessionID)
+        #expect(loaded.agent == .dsh, "source == dsh should tag the row as the DSH agent")
+        #expect(loaded.isStreaming == true)
+    }
+
+    @Test func codexSourceSessionIsTaggedCodex() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let store = StatusStore(stateDirectories: [directory])
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+
+        // Codex reports via its hook with a UUID session id and source "codex";
+        // it must not fall through to the Claude-UUID branch (the star glyph).
+        let codexSession = SessionState(
+            sessionID: "019ffdc6-052d-7c20-a086-8d6bc2cfedc7",
+            state: .running,
+            message: "Codex is working",
+            cwd: "/tmp/codex-project",
+            updatedAt: Date(),
+            turnID: nil,
+            source: "codex",
+            isStreaming: true
+        )
+        let data = try encoder.encode(codexSession)
+        let url = directory.appendingPathComponent("session-codex.json")
+        try data.write(to: url)
+
+        store.refresh()
+
+        guard let loaded = store.sessions.first else {
+            Issue.record("expected one Codex session to survive refresh")
+            return
+        }
+        #expect(loaded.agent == .codex, "source == codex should tag the row as the Codex agent")
+        #expect(Agent.codex.imageResource == "openai-logo",
+                "Codex rows should render the OpenAI mark, not the star glyph")
+    }
+
     @Test func everyAgentHasStableDistinctIcon() {
-        #expect(Agent.allCases.count == 3)
+        #expect(Agent.allCases.count == 4)
         #expect(Set(Agent.allCases.map { $0.symbol }).count == Agent.allCases.count,
                 "each agent gets its own icon so rows stay distinguishable")
-        #expect(Set(Agent.allCases.map { $0.rawValue }).count == 3)
+        #expect(Set(Agent.allCases.map { $0.rawValue }).count == 4)
+        // The DSH agent renders its brand whale image, but still keeps a distinct
+        // SF Symbol fallback (and tint) so the invariant above holds.
+        #expect(Agent.dsh.symbol != Agent.claude.symbol)
+        #expect(Agent.dsh.symbol != Agent.codex.symbol)
+        #expect(Agent.dsh.tint != .blue, "dsh tint should differ from codex's blue")
     }
 
     @Test func everyStateUsesStableFilledMenuIndicator() {

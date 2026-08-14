@@ -44,6 +44,7 @@ enum Agent: String, CaseIterable, Codable {
     case claude
     case codex
     case opencode
+    case dsh
 
     /// The menu-bar/reference label used in test assertions.
     /// A distinct (if imperfect) SF Symbol per agent keeps the rows readable.
@@ -52,6 +53,7 @@ enum Agent: String, CaseIterable, Codable {
         case .claude: "sparkles"
         case .codex: "chevron.left.forwardslash.chevron.right"
         case .opencode: "terminal"
+        case .dsh: "cpu"
         }
     }
 
@@ -60,6 +62,21 @@ enum Agent: String, CaseIterable, Codable {
         case .claude: .orange
         case .codex: .blue
         case .opencode: .green
+        // DeepSeek brand blue; only used as the fallback glyph since .dsh rows
+        // render the whale image.
+        case .dsh: Color(red: 0x4D / 255.0, green: 0x6B / 255.0, blue: 0xFE / 255.0)
+        }
+    }
+
+    /// Name of a bundled PNG rendered as the row's glyph instead of an SF Symbol.
+    /// Nil means "use `symbol` / `tint`" (the default SF Symbol path). Agents with
+    /// an official brand mark ship it here so the status light shows their real
+    /// icon (Codex → OpenAI blossom, DSH → DeepSeek whale).
+    var imageResource: String? {
+        switch self {
+        case .dsh: "dsh-whale"
+        case .codex: "openai-logo"
+        case .claude, .opencode: nil
         }
     }
 }
@@ -286,14 +303,42 @@ final class StatusStore: ObservableObject {
             return kill(pid, 0) == 0
         }
 
-        // Non-numeric session id: keep it only if any supported agent runs.
-        return anyAgentProcessRunning()
+        // Non-numeric session id: keep it only if any supported agent runs, or if
+        // DSH itself is actively writing session logs (see anyDshSessionRunning).
+        return anyAgentProcessRunning() || anyDshSessionRunning()
     }
 
     private func anyAgentProcessRunning() -> Bool {
         // `pgrep -x` matches the exact process name; multiple -x args act as
         // AND, so probe each supported agent independently and OR the results.
         return Self.agentProcessNames.contains { doesAnyProcessExist([$0]) }
+    }
+
+    /// Returns `true` while DSH is actively writing session logs.
+    ///
+    /// DSH runs under generic ``node``, so there is no stable process name to
+    /// pgrep. Instead we treat DSH as alive whenever one of its persisted
+    /// ``$DSH_HOME/sessions/**/session.jsonl.zstd`` logs changed within a short
+    /// window — a live turn writes events continuously. This keeps per-session
+    /// DSH rows visible while DSH is in use, and lets them age out (stale-removal
+    /// below) once DSH closes.
+    private func anyDshSessionRunning() -> Bool {
+        let dshHome = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".dsh/sessions", isDirectory: true)
+        guard let enumerator = FileManager.default.enumerator(
+            at: dshHome, includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        ) else { return false }
+        let cutoff = Date().addingTimeInterval(-90)  // ~90s of no DSH writes => idle
+        var found = false
+        for case let url as URL in enumerator where url.lastPathComponent == "session.jsonl.zstd" {
+            if let date = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate,
+               date > cutoff {
+                found = true
+                break
+            }
+        }
+        return found
     }
 
     /// Returns whether `pgrep` finds at least one process named in `names`.
@@ -316,11 +361,21 @@ final class StatusStore: ObservableObject {
         }
     }
 
-    /// Maps a session ID to the agent that owns it, so each row can be tagged.
+    /// Tags a session row with the agent that owns it, so the icon is accurate.
+    /// - A DSH session carries ``source`` field ``"dsh"`` (written by the DSH
+    ///   status bridge) — tag it before the UUID/process heuristics run.
     /// - Numeric IDs are PIDs (Codex and OpenCode): resolve the live process
-    ///   name to pick the agent.
-    /// - Non-numeric IDs are Claude Code transcript UUIDs.
-    private func agent(for sessionID: String) -> Agent? {
+    ///   name.
+    /// - Non-numeric IDs fall back to Claude Code transcript UUIDs.
+    private func agent(for sessionID: String, source: String?) -> Agent? {
+        // Explicit source tags written by the status hooks / bridge are the most
+        // reliable signal. Codex emits `codex`, DSH emits `dsh`; a bare `hook:...`
+        // source is a Claude session (Claude's hook reports its transcript UUID).
+        if let src = source?.lowercased() {
+            if src == "codex" { return .codex }
+            if src == "dsh" { return .dsh }
+            if src == "opencode" { return .opencode }
+        }
         guard let pid = pid_t(sessionID), let name = processName(for: pid) else {
             return .claude  // UUID transcript belongs to Claude Code
         }
@@ -349,7 +404,7 @@ final class StatusStore: ObservableObject {
 
                 // Tag the row with its owning agent so mixed lives stay
                 // distinguishable in the shared window.
-                state.agent = agent(for: state.sessionID)
+                state.agent = agent(for: state.sessionID, source: state.source)
 
                 // Remove sessions whose owning agent process has already exited.
                 if !isAgentProcessAlive(sessionID: state.sessionID) {
@@ -443,16 +498,29 @@ struct SessionRowView: View {
 }
 
 /// A small glyph marking which agent produced a session. Falls back to a
-/// neutral code symbol when the agent is unknown.
+/// neutral SF Symbol when no brand image present. Agents with an official brand
+/// mark (Codex → OpenAI blossom, DSH → DeepSeek whale) render their bundled PNG.
 struct AgentIndicator: View {
     let agent: Agent?
 
     var body: some View {
-        Image(systemName: agent?.symbol ?? "circle")
-            .font(.system(size: 11, weight: .semibold))
-            .foregroundStyle(agent?.tint ?? .secondary)
-            .frame(width: 14, height: 14)
-            .help(agent?.rawValue ?? "Unknown agent")
+        Group {
+            if let resource = agent?.imageResource,
+               let path = Bundle.main.path(forResource: resource, ofType: "png")
+                          ?? Bundle.module.path(forResource: resource, ofType: "png"),
+               let nsImage = NSImage(contentsOfFile: path) {
+                Image(nsImage: nsImage)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 14, height: 14)
+            } else {
+                Image(systemName: agent?.symbol ?? "circle")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(agent?.tint ?? .secondary)
+                    .frame(width: 14, height: 14)
+            }
+        }
+        .help(agent?.rawValue ?? "Unknown agent")
     }
 }
 

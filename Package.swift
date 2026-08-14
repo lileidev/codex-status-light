@@ -8,7 +8,10 @@ let package = Package(
         .executable(name: "AgentsLight", targets: ["AgentsLight"]),
     ],
     targets: [
-        .executableTarget(name: "AgentsLight"),
+        .executableTarget(
+            name: "AgentsLight",
+            resources: [.process("Resources")]
+        ),
         .testTarget(name: "AgentsLightTests", dependencies: ["AgentsLight"]),
     ]
 )
