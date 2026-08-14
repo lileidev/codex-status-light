@@ -56,6 +56,12 @@ _TURN_END_ERROR = ("error", "blocked", "max-tokens")
 # How long a running turn must stay silent before we emit 'done'.
 IDLE_DONE_SECONDS = 12.0
 
+# A turn is considered "streaming" while a generative chunk (assistant/text/tool
+# chunk) landed within STREAMING_WINDOW_SECONDS of the latest event. Measuring by
+# event-time gaps keeps the blinking light steady during sustained generation
+# even when the tail of the log is momentarily a tool event.
+STREAMING_WINDOW_SECONDS = 6.0
+
 # A DSH session whose log has not been written for this long is considered
 # "closed" and its status row is cleared, so the light only shows sessions that
 # are still open/recently active. Override via DSH_ACTIVE_WINDOW_SECONDS.
@@ -240,6 +246,7 @@ def status_for(events: list[dict]) -> tuple[str, str, bool, float]:
     state = "running"
     streaming = False
     last_ts = 0.0
+    last_stream_ts = 0.0
     last_was_error = False
 
     for e in events:
@@ -257,33 +264,37 @@ def status_for(events: list[dict]) -> tuple[str, str, bool, float]:
             reason = (data.get("reason") or {}).get("kind") if isinstance(data, dict) else None
             if reason in _TURN_END_ERROR:
                 state = "error"
-                streaming = False
                 last_was_error = True
             else:
                 state = "done"
-                streaming = False
                 last_was_error = False
+            streaming = False
         elif kind in _MSG_DONE:
             state = "done"
-            streaming = False
             last_was_error = False
+            streaming = False
         elif kind == "tool/result":
             for cid in _tool_result_call_ids(data):
                 open_questions.discard(cid)
             if isinstance(data, dict) and data.get("error"):
                 state = "error"
-                streaming = False
                 last_was_error = True
             else:
                 state = "running"
                 last_was_error = False
         elif kind in _MSG_STREAMS:
             state = "running"
-            streaming = True
             last_was_error = False
+            if ts:
+                last_stream_ts = max(last_stream_ts, ts)
         elif kind in _MSG_RUNNING:
             state = "running"
             last_was_error = False
+
+    # Streaming = a generative chunk landed recently, so a turn that is actively
+    # producing keeps the light blinking regardless of the tail event type.
+    if last_stream_ts:
+        streaming = state == "running" and (last_ts - last_stream_ts) <= STREAMING_WINDOW_SECONDS
 
     # If the turn ended on a tool error (no later activity), surface the error;
     # otherwise a transient tool error followed by more work stays running.

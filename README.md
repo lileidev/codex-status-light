@@ -94,7 +94,9 @@ The login LaunchAgent keeps the watcher running; to run it manually:
 ```
 
 State mapping: a DSH `user/message`, `turn/start`, `step/start`, or `tool/call`
-turns the light blue (blinking while streaming); an unanswered
+turns the light blue, blinking while the model is streaming output (a chunk
+landed within a recent window, so sustained generation keeps blinking even when
+the tail of the log is momentarily a tool event); an unanswered
 `ask_user_question`/`request_user_input` tool call or a pending sandbox approval
 (`approval/asked` with no matching `approval/decided`) turns it yellow; a
 `turn/end` reported with an error/blocked reason turns it red; a `turn/end` with

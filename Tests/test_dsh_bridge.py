@@ -63,6 +63,30 @@ class DshBridgeTests(unittest.TestCase):
         self.assertEqual(state, "running")
         self.assertTrue(streaming)
 
+    def test_streaming_stays_on_across_tool_event_within_window(self):
+        # A chunk then a tool call within the window: still actively generating,
+        # so keep blinking (the tail is not a chunk but generation is ongoing).
+        state, _, streaming, _ = module.status_for([
+            ev("user/message", 1000),
+            ev("assistant/chunk", 1100),
+            ev("tool/call", 1200, {"name": "bash", "callId": "c1"}),
+        ])
+        self.assertEqual(state, "running")
+        self.assertTrue(streaming)
+
+    def test_streaming_off_when_chunk_is_stale(self):
+        # The most recent generative chunk is older than the window threshold,
+        # so the light is done blinking even though it is still running.
+        base = 1_000_000_0  # 10000 s
+        state, _, streaming, _ = module.status_for([
+            ev("user/message", base),
+            ev("assistant/chunk", base),
+            ev("tool/call", base + int(module.STREAMING_WINDOW_SECONDS * 1000) + 2000,
+               {"name": "bash", "callId": "c2"}),
+        ])
+        self.assertEqual(state, "running")
+        self.assertFalse(streaming)
+
     def test_tool_result_error_sets_error_state(self):
         state, message, streaming, _ = module.status_for([
             ev("tool/call", 1000, {"name": "bash", "callId": "c1"}),
