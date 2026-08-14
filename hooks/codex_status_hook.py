@@ -144,11 +144,12 @@ def ensure_app_running() -> None:
 
 
 def _parent_process_name() -> str | None:
-    """Return the executable name of the parent process, e.g. "codex".
+    """Return the executable name of the parent process, e.g. ``codex``.
 
-    Uses `ps -o comm=` (just the executable name), not the full command line,
-    so a hook never mistakes a `~/.codex` path in a shell command for an actual
-    Codex process.
+    Uses `ps -o comm=` (which on macOS yields the executable path). We return
+    the trailing basename so callers can compare against a bare process name;
+    a hook never mistakes a `~/.codex` path in a shell command for an actual
+    Codex process because we only read the parent's own executable, not argv.
     """
     try:
         result = subprocess.run(
@@ -157,7 +158,10 @@ def _parent_process_name() -> str | None:
             text=True,
             timeout=2,
         )
-        return result.stdout.strip() if result.returncode == 0 else None
+        if result.returncode != 0:
+            return None
+        value = result.stdout.strip()
+        return value.rsplit("/", 1)[-1] if value else None
     except Exception:
         return None
 
@@ -165,18 +169,27 @@ def _parent_process_name() -> str | None:
 def _session_id(event: dict) -> str:
     """Return a stable session ID for this Codex invocation.
 
-    Prefer the parent process PID when the parent is actually a Codex process.
-    Using a PID enables the Swift app to clean up sessions whose owning Codex
-    process has exited. Fall back to Codex's own session_id (usually a UUID)
-    only when the parent process is not a Codex process.
+    Order of preference:
+      1. ``CODEX_SESSION_ID`` env var — Codex injects this and it is stable for
+         the whole of a single Codex session, so every hook event maps to one
+         row. (Codex's ``event.session_id`` alone is NOT stable across events,
+         which previously split one window into several status rows.)
+      2. The parent process PID, when the parent really is a Codex process —
+         lets the Swift app clean up rows once that process exits.
+      3. Codex's ``session_id`` from the event, as a last resort.
     """
+    env_id = os.environ.get("CODEX_SESSION_ID")
+    if env_id:
+        return str(env_id)
     try:
         if _parent_process_name() == "codex":
+            # The parent is the Codex process itself, so its PID is a stable
+            # per-window id: every hook event of one Codex run maps to one row.
             return str(os.getppid())
     except Exception as exc:
         _log(f"_session_id: ppid probe error {exc}")
 
-    session = event.get("session_id") or os.environ.get("CODEX_SESSION_ID")
+    session = event.get("session_id")
     if session:
         return str(session)
     return "manual"
@@ -259,7 +272,7 @@ def emit(state: str, message: str, event: dict, is_streaming: bool = False) -> N
         "--session", session_id,
         "--message", message,
         "--cwd", str(event.get("cwd") or os.getcwd()),
-        "--source", f"hook:{event.get('hook_event_name', 'unknown')}",
+        "--source", "codex",
         "--quiet",
     ]
     if event.get("turn_id"):
