@@ -64,8 +64,8 @@ STREAMING_WINDOW_SECONDS = 6.0
 
 # A DSH session whose log has not been written for this long is considered
 # "closed" and its status row is cleared, so the light only shows sessions that
-# are still open/recently active. Override via DSH_ACTIVE_WINDOW_SECONDS.
-ACTIVE_WINDOW_SECONDS = float(os.environ.get("DSH_ACTIVE_WINDOW_SECONDS", "600"))
+# are still recently active. Override via DSH_ACTIVE_WINDOW_SECONDS.
+ACTIVE_WINDOW_SECONDS = float(os.environ.get("DSH_ACTIVE_WINDOW_SECONDS", "180"))
 
 
 def dsh_home() -> pathlib.Path:
@@ -413,47 +413,65 @@ def clear(session_id: str) -> None:
 
 
 def process_log(log_path: pathlib.Path, session_id: str, seen: dict, cache: dict) -> None:
+    """Reconcile one DSH session log with its status row.
+
+    Active-window clearance runs on *every* full scan, not only when a log's
+    bytes change: a stale session whose `.zstd` log has stopped being written is
+    still a candidate for removal, otherwise its status row lingers forever even
+    though the ``seen`` marker never changes.
+    """
+    key = str(log_path)
     try:
         st = log_path.stat()
         marker = (st.st_mtime, st.st_size)
     except OSError:
         return
-    if seen.get(log_path) == marker:
-        return
 
-    events = decode_log(log_path)
-    if not events:
-        seen[log_path] = marker
-        return
-
+    # Cache holds (last_ts, state, message, streaming, cwd); reusing last_ts lets
+    # us age out untouched logs without re-decompressing them every scan.
+    cached = cache.get(key)
+    last_ts = cached[0] if cached else 0.0
     now = time.time()
-    state, message, streaming, last_ts = status_for(events)
 
-    # Only show sessions that are still open/recently active. A DSH session
-    # whose log has not changed for a while is closed, so remove its status row
-    # instead of surfacing an old session among the open ones.
+    state = message = None
+    streaming = False
+    cwd = ""
+    # Re-decode and recompute only when the log actually changed since last scan.
+    changed = seen.get(log_path) != marker
+    if changed:
+        events = decode_log(log_path)
+        if events:
+            state, message, streaming, ts = status_for(events)
+            last_ts = ts or last_ts
+            # Idle turn completion: a live turn that has gone quiet is done.
+            if (now - last_ts) > IDLE_DONE_SECONDS:
+                state = "done"
+                message = "DSH turn completed"
+                streaming = False
+            cwd = session_cwd(events)
+            cache[key] = (last_ts, state, message, streaming, cwd)
+        else:
+            seen[log_path] = marker
+            return
+
+    # Active-window expiry: on EVERY scan (whether or not the log changed), drop
+    # any session whose last activity is older than the window, so closed DSH
+    # sessions don't accumulate as clutter. `seen`/`cache` give us the last_ts
+    # even for logs that stopped being written.
     if not last_ts or (now - last_ts) > ACTIVE_WINDOW_SECONDS:
-        if seen.get(log_path) != marker:
+        if changed or cached:
             clear(session_id)
         seen[log_path] = marker
-        cache.pop(str(log_path), None)
+        cache.pop(key, None)
         return
 
-    # Idle turn completion: if a session went quiet a while ago it is done,
-    # regardless of whether its last surface state was running or error. A live
-    # DSH session emits events continuously, so only truly silent logs age out.
-    if (now - last_ts) > IDLE_DONE_SECONDS:
-        state = "done"
-        message = "DSH turn completed"
-        streaming = False
-
-    prev = cache.get(str(log_path))
-    if prev == (state, message):
+    if not changed:
+        # Alive but unchanged since its last emission: nothing new to surface.
         seen[log_path] = marker
         return
-    cache[str(log_path)] = (state, message)
-    emit(state, session_id, message, streaming, cwd=session_cwd(events))
+
     seen[log_path] = marker
+    emit(state, session_id, message, streaming, cwd=cwd)
 
 
 def main() -> int:

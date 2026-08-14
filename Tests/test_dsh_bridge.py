@@ -253,6 +253,48 @@ class DshBridgeTests(unittest.TestCase):
 
             self.assertEqual(calls, [("clear", "session-uuid")])
 
+    def test_process_log_clears_already_seen_stale_log_on_later_scan(self):
+        # The real-world bug: once a stale log's bytes are marked as seen, the
+        # watcher returned early on every later scan and NEVER re-evaluated the
+        # active window, so old DSH rows accumulated forever. A log that was
+        # seen before (marker unchanged) must still be cleared once its last
+        # activity exceeds the active window.
+        import tempfile as _tf
+        with _tf.TemporaryDirectory() as root:
+            base = pathlib.Path(root)
+            log = base / "session.jsonl.zstd"
+            log.write_bytes(b"dummy")
+            events = [
+                {"type": "session", "time": 1000, "data": {"id": "s"}},
+                # last event is far in the past -> outside the active window
+            ]
+            calls = []
+            original_decode = module.decode_log
+            original_emit = module.emit
+            original_clear = module.clear
+            try:
+                module.decode_log = lambda p: events
+                module.clear = lambda sid: calls.append(("clear-2", sid))
+                module.emit = lambda *a, **k: calls.append(("emit", a))
+
+                # Simulate a log that was already processed: its marker is in
+                # `seen` (unchanged) and its old last_ts is cached. A later scan
+                # must still clear it because its last activity is past the
+                # active window — this is exactly the accumulation bug.
+                st = log.stat()
+                marker = (st.st_mtime, st.st_size)
+                seen = {log: marker}
+                cache = {str(log): (1.0, "running", "Codex is working", False, "/tmp")}
+                module.process_log(log, "session-uuid", seen, cache)
+            finally:
+                module.decode_log = original_decode
+                module.emit = original_emit
+                module.clear = original_clear
+
+            self.assertEqual(calls, [("clear-2", "session-uuid")],
+                             "an unchanged-but-stale log must be cleared on a "
+                             "later scan")
+
 
 if __name__ == "__main__":
     unittest.main()

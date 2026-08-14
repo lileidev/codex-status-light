@@ -103,9 +103,10 @@ the tail of the log is momentarily a tool event); an unanswered
 a completed reason, or a turn that goes quiet, turns it green.
 
 Only **recently active** DSH sessions are shown: a DSH session whose log has not
-been written for `DSH_ACTIVE_WINDOW_SECONDS` seconds (default 600, i.e. 10
-minutes) has its status row removed, so historical DSH sessions don't clutter the
-light — only the sessions you're actually working in stay visible.
+been written for `DSH_ACTIVE_WINDOW_SECONDS` seconds (default 180, i.e. 3
+minutes) has its status row removed, so old DSH sessions are pruned automatically
+and don't clutter the light — only the sessions you're actually working in stay
+visible.
 
 ## Manual CLI
 
