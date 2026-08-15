@@ -334,6 +334,24 @@ def main() -> int:
     name = event.get("hook_event_name", "")
     _log(f"main: event={name}")
 
+    # Skip embedded/external Claude Code sessions that are not launched by an
+    # interactive `claude` process (notably Obsidian Copilot and similar tools
+    # that drive Claude Code programmatically). Their parent process is not
+    # `claude`, so they would otherwise clutter the status light and never be
+    # pruned. Only real interactive Claude sessions are surfaced. This also
+    # makes _session_id() return a PID (which the Swift app can clean up) rather
+    # than a lingering transcript UUID.
+    #
+    # A CLAUDE_STATUS_LIGHT_PARENT env override exists so tests (and any
+    # controlled harness) can simulate an interactive claude parent; normal
+    # Obsidian/embedded uses never set it.
+    parent = _parent_process_name()
+    if os.environ.get("CLAUDE_STATUS_LIGHT_PARENT"):
+        parent = os.environ["CLAUDE_STATUS_LIGHT_PARENT"]
+    if parent != "claude":
+        _log(f"main: skipping (parent not claude, got {parent!r}) — event={name}")
+        return 0
+
     ensure_app_running()
 
     session_id = _session_id(event)

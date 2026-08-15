@@ -31,6 +31,9 @@ class ClaudeStatusHookTests(unittest.TestCase):
         self.env = os.environ.copy()
         self.env["AGENTS_STATUS_LIGHT_HOME"] = str(self.directory)
         self.env["AGENTS_STATUS_LIGHT_DIR"] = str(self.directory / "state")
+        # In tests the parent is pytest, not `claude`; simulate an interactive
+        # Claude parent so the parent-process gate lets the hook run.
+        self.env["CLAUDE_STATUS_LIGHT_PARENT"] = "claude"
 
     def tearDown(self):
         self._tmp.cleanup()
@@ -133,6 +136,30 @@ class ClaudeStatusHookTests(unittest.TestCase):
         # Parent is not Claude (e.g. a shell) -> fall back to the transcript UUID.
         with unittest.mock.patch.object(module, "_parent_process_name", return_value="/bin/zsh"):
             self.assertEqual(module._session_id({"session_id": "transcript-abc"}), "transcript-abc")
+
+    def test_non_claude_parent_is_skipped(self):
+        # Obsidian Copilot (and similar tools) drive Claude Code programmatically,
+        # so their hook parent is NOT `claude`. Those must not write a status row,
+        # even though a SessionStart event arrives.
+        import copy
+        env = copy.copy(self.env)
+        env.pop("CLAUDE_STATUS_LIGHT_PARENT", None)  # no override -> real parent (pytest)
+        session_id = "0bsidian-uuid-copilot"
+        safe = "".join(c if c.isalnum() or c in "_.-" else "-" for c in session_id)
+        target = self.directory / "state" / f"{safe}.json"
+        result = subprocess.run(
+            ["python3", str(HOOK)],
+            input=json.dumps(dict(BASE, hook_event_name="SessionStart",
+                                  session_id=session_id)),
+            capture_output=True, text=True, env=env, timeout=15,
+        )
+        self.assertEqual(result.returncode, 0)
+        for _ in range(20):
+            if target.exists():
+                break
+            time.sleep(0.1)
+        self.assertFalse(target.exists(),
+                         "Obsidian/external Claude hooks must not write a status row")
 
 
 if __name__ == "__main__":
