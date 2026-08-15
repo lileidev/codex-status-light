@@ -332,6 +332,19 @@ def main() -> int:
     name = event.get("hook_event_name", "")
     _log(f"main: event={name}")
 
+    # Only surface *interactive* Codex sessions. Tools that drive Codex
+    # programmatically (embedded Codex, CI, other integrations) run the hook with
+    # a parent process that is not `codex`, so their sessions would surface as
+    # transcript-UUID rows the app cannot prune. Skip any invocation whose parent
+    # isn't `codex`; this also makes _session_id() a PID that the app can clean
+    # up. CODEX_STATUS_LIGHT_PARENT is a test override for controlled harnesses.
+    parent = _parent_process_name()
+    if os.environ.get("CODEX_STATUS_LIGHT_PARENT"):
+        parent = os.environ["CODEX_STATUS_LIGHT_PARENT"]
+    if parent != "codex":
+        _log(f"main: skipping (parent not codex, got {parent!r}) — event={name}")
+        return 0
+
     # Make sure the status-light app is running whenever Codex is active.
     # SessionStart is the first hook fired, so this also covers "Codex started".
     ensure_app_running()

@@ -65,6 +65,7 @@ class StatusLightTests(unittest.TestCase):
             environment = os.environ.copy()
             environment["AGENTS_STATUS_LIGHT_HOME"] = str(ROOT)
             environment["AGENTS_STATUS_LIGHT_DIR"] = directory
+            environment["CODEX_STATUS_LIGHT_PARENT"] = "codex"  # simulate interactive parent
 
             self.run_hook({
                 "hook_event_name": "PermissionRequest",
@@ -86,6 +87,7 @@ class StatusLightTests(unittest.TestCase):
             environment = os.environ.copy()
             environment["AGENTS_STATUS_LIGHT_HOME"] = str(ROOT)
             environment["AGENTS_STATUS_LIGHT_DIR"] = directory
+            environment["CODEX_STATUS_LIGHT_PARENT"] = "codex"  # simulate interactive parent
 
             # Waiting for permission or question (yellow light).
             self.run_hook({

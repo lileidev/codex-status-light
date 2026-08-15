@@ -66,3 +66,30 @@ class CodexHookSessionIdTests(unittest.TestCase):
         with mock.patch.dict(module.os.environ, env):
             sid = module._session_id({"session_id": "event-id"})
         self.assertEqual(sid, "env-stable")
+
+    def test_main_skips_when_parent_not_codex(self):
+        # Embedded/CI Codex hooks (parent != codex) must not write any status
+        # row — mirror the interactive-only rule added for Claude/Obsidian.
+        import io
+        import json
+        event = json.dumps({"hook_event_name": "SessionStart",
+                            "session_id": "uuid-abc"})
+        with mock.patch("codex_status_hook.sys.stdin", io.StringIO(event)), \
+             mock.patch("codex_status_hook._parent_process_name", return_value="node"), \
+             mock.patch("codex_status_hook.set_state") as set_state, \
+             mock.patch("codex_status_hook.ensure_app_running"):
+            rc = module.main()
+        self.assertEqual(rc, 0)
+        set_state.assert_not_called()
+
+    def test_main_runs_when_parent_is_codex(self):
+        import io
+        import json
+        event = json.dumps({"hook_event_name": "SessionStart",
+                            "session_id": "019ffdc6-052d-7c20-a086-8d6bc2cfedc7"})
+        with mock.patch("codex_status_hook.sys.stdin", io.StringIO(event)), \
+             mock.patch("codex_status_hook._parent_process_name", return_value="codex"), \
+             mock.patch("codex_status_hook.set_state") as set_state, \
+             mock.patch("codex_status_hook.ensure_app_running"):
+            module.main()
+        set_state.assert_called()
