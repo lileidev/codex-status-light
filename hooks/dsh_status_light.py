@@ -71,6 +71,12 @@ STREAMING_WINDOW_SECONDS = 6.0
 # are still recently active. Override via DSH_ACTIVE_WINDOW_SECONDS.
 ACTIVE_WINDOW_SECONDS = float(os.environ.get("DSH_ACTIVE_WINDOW_SECONDS", "180"))
 
+# A session mid-turn (an open deep dive: a user/message or turn/start with no
+# matching turn/end yet) can legitimately go silent for a long time while the
+# model thinks. It is only aged out once it has been COMPLETELY silent longer
+# than DEEP_HOLD_SECONDS, so a long silent dive doesn't vanish from the light.
+DEEP_HOLD_SECONDS = float(os.environ.get("DSH_DEEP_HOLD_SECONDS", "1800"))
+
 
 def dsh_home() -> pathlib.Path:
     return pathlib.Path(os.environ.get("DSH_HOME", str(pathlib.Path.home() / ".dsh"))).expanduser()
@@ -240,6 +246,26 @@ def _pending_approval_ids(events: list[dict]) -> set[str]:
             if isinstance(data, dict) and data.get("id"):
                 pending.discard(data["id"])
     return pending
+
+
+def has_open_turn(events: list[dict]) -> bool:
+    """True when the session is mid-flight (a still-running deep dive).
+
+    A session is "open" while the most recent activity is newer than its last
+    explicit close marker (`turn/end` / `session/end-seed`). `user/message` and
+    `turn/start`/`turn/end` are NOT 1:1 in DSH logs, so we compare timestamps
+    rather than balancing counts. Open (mid-dive) sessions are held much longer
+    than closed ones so a long silent dive doesn't vanish from the light.
+    """
+    last_any = 0.0
+    last_close = 0.0
+    for e in events:
+        ts = event_epoch(e)
+        if ts > last_any:
+            last_any = ts
+        if e.get("type") in ("turn/end", "session/end-seed") and ts > last_close:
+            last_close = ts
+    return last_any > last_close
 
 
 def status_for(events: list[dict]) -> tuple[str, str, bool, float]:
@@ -461,10 +487,11 @@ def process_log(log_path: pathlib.Path, session_id: str, seen: dict, cache: dict
     except OSError:
         return
 
-    # Cache holds (last_ts, state, message, streaming, cwd); reusing last_ts lets
-    # us age out untouched logs without re-decompressing them every scan.
+    # Cache holds (last_ts, state, message, streaming, cwd, open_turn); reusing
+    # last_ts lets us age out untouched logs without re-decompressing every scan.
     cached = cache.get(key)
     last_ts = cached[0] if cached else 0.0
+    open_turn = bool(cached[5]) if cached else False
     now = time.time()
 
     state = message = None
@@ -477,22 +504,26 @@ def process_log(log_path: pathlib.Path, session_id: str, seen: dict, cache: dict
         if events:
             state, message, streaming, ts = status_for(events)
             last_ts = ts or last_ts
-            # Idle turn completion: a live turn that has gone quiet is done.
-            if (now - last_ts) > IDLE_DONE_SECONDS:
+            open_turn = has_open_turn(events)
+            # A turn that is still open (mid deep dive) stays running while it
+            # stays within the deep-hold window; only a genuinely done/closed
+            # turn (or one silent past the hold) is marked done here.
+            if not open_turn and (now - last_ts) > IDLE_DONE_SECONDS:
                 state = "done"
                 message = "DSH turn completed"
                 streaming = False
             cwd = session_cwd(events)
-            cache[key] = (last_ts, state, message, streaming, cwd)
+            cache[key] = (last_ts, state, message, streaming, cwd, open_turn)
         else:
             seen[log_path] = marker
             return
 
     # Active-window expiry: on EVERY scan (whether or not the log changed), drop
-    # any session whose last activity is older than the window, so closed DSH
-    # sessions don't accumulate as clutter. `seen`/`cache` give us the last_ts
-    # even for logs that stopped being written.
-    if not last_ts or (now - last_ts) > ACTIVE_WINDOW_SECONDS:
+    # a session that has gone quiet, so closed DSH sessions don't accumulate as
+    # clutter. A session with an open deep-dive turn is held much longer
+    # (DEEP_HOLD_SECONDS) so a long silent dive doesn't vanish from the light.
+    window = DEEP_HOLD_SECONDS if open_turn else ACTIVE_WINDOW_SECONDS
+    if not last_ts or (now - last_ts) > window:
         if changed or cached:
             clear(session_id)
         seen[log_path] = marker

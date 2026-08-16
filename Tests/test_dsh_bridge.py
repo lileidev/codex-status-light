@@ -5,6 +5,7 @@ import pathlib
 import shutil
 import sys
 import tempfile
+import time
 import unittest
 
 
@@ -320,7 +321,7 @@ class DshBridgeTests(unittest.TestCase):
                 st = log.stat()
                 marker = (st.st_mtime, st.st_size)
                 seen = {log: marker}
-                cache = {str(log): (1.0, "running", "Codex is working", False, "/tmp")}
+                cache = {str(log): (1.0, "running", "Codex is working", False, "/tmp", False)}
                 module.process_log(log, "session-uuid", seen, cache)
             finally:
                 module.decode_log = original_decode
@@ -330,6 +331,40 @@ class DshBridgeTests(unittest.TestCase):
             self.assertEqual(calls, [("clear-2", "session-uuid")],
                              "an unchanged-but-stale log must be cleared on a "
                              "later scan")
+
+    def test_open_turn_session_is_held_but_closed_one_cleared(self):
+        # A session with an OPEN deep-dive turn (mid-think, silent for a while)
+        # must be retained well past the short active window; a CLOSED session
+        # with the same silence must be cleared.
+        import tempfile as _tf
+        now = time.time()
+        five_min_ago = now - 300
+        for name, open_turn, expect_clear in (
+            ("open", True, False),
+            ("closed", False, True),
+        ):
+            with _tf.TemporaryDirectory() as root:
+                base = pathlib.Path(root)
+                log = base / f"{name}.zstd"
+                log.write_bytes(b"dummy")
+                st = log.stat()
+                marker = (st.st_mtime, st.st_size)
+                seen = {log: marker}
+                cache = {str(log): (five_min_ago, "running", "DSH is working",
+                                    False, "/tmp", open_turn)}
+                calls = []
+                original_clear = module.clear
+                module.clear = lambda sid, c=calls: c.append(("clear", sid))
+                try:
+                    module.process_log(log, "session-uuid", seen, cache)
+                finally:
+                    module.clear = original_clear
+                if expect_clear:
+                    self.assertIn(("clear", "session-uuid"), calls,
+                                  f"{name} should be cleared")
+                else:
+                    self.assertNotIn(("clear", "session-uuid"), calls,
+                                     f"open-turn {name} should be held")
 
 
 if __name__ == "__main__":

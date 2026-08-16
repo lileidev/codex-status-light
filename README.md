@@ -114,7 +114,11 @@ Only **recently active** DSH sessions are shown: a DSH session whose log has not
 been written for `DSH_ACTIVE_WINDOW_SECONDS` seconds (default 180, i.e. 3
 minutes) has its status row removed, so old DSH sessions are pruned automatically
 and don't clutter the light — only the sessions you're actually working in stay
-visible.
+visible. A session with an **open turn** (a user prompt with no `turn/end` yet,
+e.g. a long silent deep dive) is held much longer (`DSH_DEEP_HOLD_SECONDS`,
+default 1800 i.e. 30 minutes) so a deep-diving window doesn't vanish from the
+light while the model is still thinking; once the turn ends it ages out on the
+normal 3-minute window.
 
 ## Manual CLI
 
