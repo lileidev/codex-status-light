@@ -87,7 +87,12 @@ def main() -> int:
             },
             "StandardOutPath": str(install / "dsh_status_light.out.log"),
             "StandardErrorPath": str(install / "dsh_status_light.err.log"),
-            "ProcessType": "Background",
+            # Run in the user GUI (Aqua) session, not the generic Background
+            # daemon session: from a Background launchd job, `/usr/bin/open` to
+            # launch the GUI app takes ~15-20s to attach, but from the user
+            # session it is ~1s. DSH auto-lanch of the status-light app needs the
+            # poor man's user session to be quick.
+            "LimitLoadToSessionType": "Aqua",
         }
         if args.dry_run:
             print(f"  would write LaunchAgent {launch_plist}")
