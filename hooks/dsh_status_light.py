@@ -539,6 +539,71 @@ def process_log(log_path: pathlib.Path, session_id: str, seen: dict, cache: dict
     emit(state, session_id, message, streaming, cwd=cwd)
 
 
+_APP_LAUNCH_LOCK = "~/.agents-status-light/.launch-lock.dsh"
+_APP_LAUNCH_COOLDOWN_SECONDS = 30.0
+_app_running_cache: tuple[bool, float] | None = None
+
+
+def _app_path() -> pathlib.Path:
+    return pathlib.Path(
+        os.environ.get(
+            "AGENTS_STATUS_LIGHT_APP",
+            str(pathlib.Path.home() / "Applications" / "AgentsLight.app"),
+        )
+    ).expanduser()
+
+
+def _app_is_running() -> bool:
+    try:
+        result = subprocess.run(["pgrep", "-x", "AgentsLight"],
+                                capture_output=True, text=True, timeout=5)
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def ensure_app_running() -> None:
+    """Launch the menu-bar app if it is not already running.
+
+    Claude/Codex hooks launch the app when they run; DSH is watched by this
+    standalone watcher instead, so it must do the same so active DSH sessions
+    surface even if the app was quit. A cooldown prevents relaunching on every
+    1.5s scan.
+    """
+    global _app_running_cache
+    if _app_running_cache and (time.time() - _app_running_cache[1]) < 5:
+        return
+    if _app_is_running():
+        _app_running_cache = (True, time.time())
+        return
+    if _app_running_cache and _app_running_cache[0] is False \
+            and (time.time() - _app_running_cache[1]) < _APP_LAUNCH_COOLDOWN_SECONDS:
+        return
+
+    lock = pathlib.Path(os.path.expanduser(_APP_LAUNCH_LOCK))
+    try:
+        if lock.exists() and (time.time() - lock.stat().st_mtime) < _APP_LAUNCH_COOLDOWN_SECONDS:
+            return
+    except OSError:
+        pass
+
+    app = _app_path()
+    cmd = ["/usr/bin/open", "-g", str(app)] if app.exists() \
+        else ["/usr/bin/open", "-g", "-a", "AgentsLight"]
+    try:
+        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+        _app_running_cache = (False, time.time())
+    except Exception as exc:
+        _log(f"ensure_app_running: open error {exc}")
+        return
+    try:
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        lock.touch(exist_ok=True)
+    except Exception:
+        pass
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(prog="dsh_status_light")
     parser.add_argument("--dsh-home", default=str(dsh_home()))
@@ -557,6 +622,13 @@ def main() -> int:
     def full_scan():
         for log, session_id in log_entries(root):
             process_log(log, session_id, seen, cache)
+        # Launch the menu-bar app if DSH has any live session showing. This only
+        # happens on a real watch loop (interval), not --once scans.
+        if args.interval:
+            for key in cache.values():
+                if key[1] == "running":  # state != cleared/done
+                    ensure_app_running()
+                    break
 
     if args.once:
         full_scan()

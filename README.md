@@ -81,7 +81,9 @@ JSONL file (`$DSH_HOME/sessions/<workspace>/<session>/session.jsonl.zstd`);
 session into the shared state directory, so each DSH session shows up as its own
 row (tagged with DeepSeek's blue whale icon, rendered from
 `Sources/AgentsLight/Resources/dsh-whale.png`). No modification of DSH itself is
-required.
+required. The DSH watcher also launches the status-light app automatically (like
+the Claude/Codex hooks) whenever a DSH session is active, so a session you start
+from the DSH web GUI still lights up even if the app wasn't open.
 
 Agent rows with an official brand mark display their real logo instead of an SF
 Symbol: Claude rows use the Claude app icon (`Sources/AgentsLight/Resources/claude-logo.png`),
