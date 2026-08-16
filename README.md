@@ -102,7 +102,9 @@ The login LaunchAgent keeps the watcher running; to run it manually:
 State mapping: a DSH `user/message`, `turn/start`, `step/start`, or `tool/call`
 turns the light blue, blinking while the model is streaming output (a chunk
 landed within a recent window, so sustained generation keeps blinking even when
-the tail of the log is momentarily a tool event); an unanswered
+the tail of the log is momentarily a tool event); a **deep dive** (`reasoning-chunks`
+with no visible output after it) also keeps it blue/streaming and labels the turn
+"DeepSeek is reasoning…(沉思中)" instead of looking idle; an unanswered
 `ask_user_question`/`request_user_input` tool call or a pending sandbox approval
 (`approval/asked` with no matching `approval/decided`) turns it yellow; a
 `turn/end` reported with an error/blocked reason turns it red; a `turn/end` with
