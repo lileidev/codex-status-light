@@ -197,7 +197,7 @@ class DshBridgeTests(unittest.TestCase):
             ev("reasoning-chunks", 1200, {"turn": 3, "step": 1}),
         ])
         self.assertEqual(state, "running")
-        self.assertEqual(message, "DeepSeek is reasoning…(沉思中)")
+        self.assertEqual(message, "DSH is deep diving")
         self.assertTrue(streaming)
 
     def test_deep_reasoning_uses_time0_timestamp(self):
@@ -212,7 +212,7 @@ class DshBridgeTests(unittest.TestCase):
             rc(110), rc(120),
         ])
         self.assertEqual(state, "running")
-        self.assertEqual(message, "DeepSeek is reasoning…(沉思中)")
+        self.assertEqual(message, "DSH is deep diving")
         self.assertTrue(streaming)
 
     def test_reasoning_then_visible_output_not_marked_reasoning(self):
@@ -221,7 +221,7 @@ class DshBridgeTests(unittest.TestCase):
             ev("assistant/chunk", 1100),
         ])
         self.assertEqual(state, "running")
-        self.assertNotEqual(message, "DeepSeek is reasoning…(沉思中)")
+        self.assertNotEqual(message, "DSH is deep diving")
 
     def test_log_entries_finds_nested_logs(self, tmp=None):
         with tempfile.TemporaryDirectory() as root:

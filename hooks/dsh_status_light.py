@@ -344,7 +344,7 @@ def status_for(events: list[dict]) -> tuple[str, str, bool, float]:
     if state in ("error", "done", "waiting"):
         streaming = False
     if is_reasoning:
-        return state, "DeepSeek is reasoning…(沉思中)", streaming, last_ts
+        return state, "DSH is deep diving", streaming, last_ts
     return state, _message_for(state), streaming, last_ts
 
 
