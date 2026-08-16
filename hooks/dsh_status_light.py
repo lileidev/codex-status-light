@@ -44,6 +44,10 @@ import sys
 import time
 
 _MSG_STREAMS = ("assistant/chunk", "text-chunks", "tool-call-chunks")
+# DeepSeek model "deep reasoning / thinking" stream events. During a long deep
+# dive the model can reason for a while without emitting visible assistant text,
+# so treat these as streaming activity to keep the light alive/blinking.
+_MSG_REASONING = ("reasoning-chunks", "think-chunks")
 _MSG_RUNNING = ("user/message", "turn/start", "step/start", "tool/call", "request/header", "request/context")
 _MSG_DONE = ("session/end-seed",)
 _WAITING_TOOLS = ("ask_user_question", "request_user_input", "AskUserQuestion")
@@ -247,6 +251,9 @@ def status_for(events: list[dict]) -> tuple[str, str, bool, float]:
     streaming = False
     last_ts = 0.0
     last_stream_ts = 0.0
+    last_visible_ts = 0.0
+    last_reasoning_ts = 0.0
+    is_reasoning = False
     last_was_error = False
 
     for e in events:
@@ -282,11 +289,20 @@ def status_for(events: list[dict]) -> tuple[str, str, bool, float]:
             else:
                 state = "running"
                 last_was_error = False
+        elif kind in _MSG_REASONING:
+            # Deep-reasoning (思考/沉思) activity counts as streaming so a long
+            # deep dive doesn't look idle, but it's not visible output.
+            state = "running"
+            last_was_error = False
+            if ts:
+                last_stream_ts = max(last_stream_ts, ts)
+                last_reasoning_ts = max(last_reasoning_ts, ts)
         elif kind in _MSG_STREAMS:
             state = "running"
             last_was_error = False
             if ts:
                 last_stream_ts = max(last_stream_ts, ts)
+                last_visible_ts = max(last_visible_ts, ts)
         elif kind in _MSG_RUNNING:
             state = "running"
             last_was_error = False
@@ -295,6 +311,16 @@ def status_for(events: list[dict]) -> tuple[str, str, bool, float]:
     # producing keeps the light blinking regardless of the tail event type.
     if last_stream_ts:
         streaming = state == "running" and (last_ts - last_stream_ts) <= STREAMING_WINDOW_SECONDS
+
+    # "Deep dive": the most recent generative activity was reasoning/thinking
+    # with no visible assistant output after it, so the model is still working
+    # but silently thinking. Surfaced as a distinct message below.
+    is_reasoning = (
+        state == "running"
+        and last_reasoning_ts > 0
+        and last_reasoning_ts >= last_visible_ts
+        and (last_ts - last_reasoning_ts) <= STREAMING_WINDOW_SECONDS
+    )
 
     # If the turn ended on a tool error (no later activity), surface the error;
     # otherwise a transient tool error followed by more work stays running.
@@ -311,6 +337,8 @@ def status_for(events: list[dict]) -> tuple[str, str, bool, float]:
         return state, message, streaming, last_ts
     if state in ("error", "done", "waiting"):
         streaming = False
+    if is_reasoning:
+        return state, "DeepSeek is reasoning…(沉思中)", streaming, last_ts
     return state, _message_for(state), streaming, last_ts
 
 

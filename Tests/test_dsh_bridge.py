@@ -187,6 +187,27 @@ class DshBridgeTests(unittest.TestCase):
         self.assertEqual(state, "error")
         self.assertFalse(streaming)
 
+    def test_deep_reasoning_is_captured_as_reasoning(self):
+        # Deep-dive: reasoning-chunks with no visible assistant text after them
+        # should be surfaced as "reasoning" and keep the light streaming (not
+        # treated as idle), so a long silent think doesn't disappear or look dead.
+        state, message, streaming, _ = module.status_for([
+            ev("user/message", 1000),
+            ev("reasoning-chunks", 1100, {"turn": 3, "step": 1}),
+            ev("reasoning-chunks", 1200, {"turn": 3, "step": 1}),
+        ])
+        self.assertEqual(state, "running")
+        self.assertEqual(message, "DeepSeek is reasoning…(沉思中)")
+        self.assertTrue(streaming)
+
+    def test_reasoning_then_visible_output_not_marked_reasoning(self):
+        state, message, _, _ = module.status_for([
+            ev("reasoning-chunks", 1000, {}),
+            ev("assistant/chunk", 1100),
+        ])
+        self.assertEqual(state, "running")
+        self.assertNotEqual(message, "DeepSeek is reasoning…(沉思中)")
+
     def test_log_entries_finds_nested_logs(self, tmp=None):
         with tempfile.TemporaryDirectory() as root:
             base = pathlib.Path(root)
