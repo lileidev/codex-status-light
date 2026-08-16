@@ -200,6 +200,21 @@ class DshBridgeTests(unittest.TestCase):
         self.assertEqual(message, "DeepSeek is reasoning…(沉思中)")
         self.assertTrue(streaming)
 
+    def test_deep_reasoning_uses_time0_timestamp(self):
+        # Real DSH reasoning-chunks expose their timestamp as `time0`, not time.
+        # Without honoring time0 the reasoning was invisible (last_reasoning_ts
+        # stayed 0 and the session looked like plain working).
+        def rc(t):
+            return {"type": "reasoning-chunks", "seq0": 1, "time0": int(t * 1000),
+                    "data": {"turn": 3, "step": 1}}
+        state, message, streaming, _ = module.status_for([
+            {"type": "user/message", "time": 1000, "data": {}},
+            rc(110), rc(120),
+        ])
+        self.assertEqual(state, "running")
+        self.assertEqual(message, "DeepSeek is reasoning…(沉思中)")
+        self.assertTrue(streaming)
+
     def test_reasoning_then_visible_output_not_marked_reasoning(self):
         state, message, _, _ = module.status_for([
             ev("reasoning-chunks", 1000, {}),

@@ -175,8 +175,14 @@ def decode_log(path: pathlib.Path) -> list[dict]:
 
 
 def event_epoch(e: dict) -> float:
-    ts = e.get("time")
-    return (ts / 1000.0) if isinstance(ts, (int, float)) and ts else 0.0
+    # Most DSH events carry `time`; some stream events (notably
+    # `reasoning-chunks`) expose their timestamp as `time0`. Honor both so the
+    # deep-dive detection gets a real recency signal.
+    for key in ("time", "time0"):
+        ts = e.get(key)
+        if isinstance(ts, (int, float)) and ts:
+            return ts / 1000.0
+    return 0.0
 
 
 def _log(message: str) -> None:
