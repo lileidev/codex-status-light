@@ -450,6 +450,25 @@ def session_cwd(events: list[dict]) -> str:
     return ""
 
 
+def is_subagent_session(events: list[dict]) -> bool:
+    """True when this DSH session is a subagent (it has a parent session).
+
+    Subagents write their own session/.zstd and would otherwise occupy their own
+    status-light row, cluttering the light (1 parent + N subagent rows per task).
+    The status watcher skips them; only the root/parent session is surfaced.
+    """
+    for e in events:
+        if e.get("type") != "session":
+            continue
+        if isinstance(e.get("parentSession"), str) and e["parentSession"]:
+            return True
+        data = e.get("data", {})
+        if isinstance(data, dict) and isinstance(data.get("parentSession"), str) \
+                and data["parentSession"]:
+            return True
+    return False
+
+
 def emit(state: str, session_id: str, message: str, is_streaming: bool = False, cwd: str = "") -> None:
     cli = command()
     if not cli.exists():
@@ -514,6 +533,14 @@ def process_log(log_path: pathlib.Path, session_id: str, seen: dict, cache: dict
     if changed:
         events = decode_log(log_path)
         if events:
+            # Subagents are separate sessions but shouldn't own a status row.
+            # Skip them (and drop any stale row that was written earlier).
+            if is_subagent_session(events):
+                if seen.get(log_path) != marker or cached:
+                    clear(session_id)
+                seen[log_path] = marker
+                cache.pop(key, None)
+                return
             state, message, streaming, ts = status_for(events)
             last_ts = ts or last_ts
             open_turn = has_open_turn(events)

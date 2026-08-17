@@ -78,9 +78,11 @@ DSH has no command hook like Codex/Claude, so instead this project watches DSH's
 durable session logs directly. DSH persists every session as a zstd-compressed
 JSONL file (`$DSH_HOME/sessions/<workspace>/<session>/session.jsonl.zstd`);
 `hooks/dsh_status_light.py` tails those logs and writes one status file per DSH
-session into the shared state directory, so each DSH session shows up as its own
-row (tagged with DeepSeek's blue whale icon, rendered from
-`Sources/AgentsLight/Resources/dsh-whale.png`). No modification of DSH itself is
+session into the shared state directory, so each root (parent) DSH session shows
+up as its own row (tagged with DeepSeek's blue whale icon, rendered from
+`Sources/AgentsLight/Resources/dsh-whale.png`); **subagent** sessions (those with
+a `parentSession`) are skipped so a task with many subagents doesn't clutter the
+light with extra rows. No modification of DSH itself is
 required. The DSH watcher also launches the status-light app automatically (like
 the Claude/Codex hooks) whenever a DSH session is active, so a session you start
 from the DSH web GUI still lights up even if the app wasn't open.

@@ -47,6 +47,19 @@ class DshBridgeTests(unittest.TestCase):
         )
         self.assertEqual(module.session_cwd([{"type": "user/message"}]), "")
 
+    def test_subagent_session_is_detected(self):
+        # A session whose `session` record carries a parentSession is a subagent
+        # and must not claim its own status row.
+        self.assertTrue(module.is_subagent_session([
+            {"type": "session", "parentSession": "parent-abc"},
+        ]))
+        self.assertFalse(module.is_subagent_session([
+            {"type": "session", "parentSession": None},
+        ]))
+        self.assertFalse(module.is_subagent_session([
+            {"type": "user/message"},
+        ]))
+
     def test_session_establishes_running(self):
         state, message, streaming, last = module.status_for([
             ev("session", 1000, {"id": "s1", "cwd": "/foo"}),
