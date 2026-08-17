@@ -432,27 +432,18 @@ final class StatusStore: ObservableObject {
 struct StatusLightView: View {
     let activeState: LightState?
     let isStreaming: Bool
-    @State private var spinning = false
 
     var body: some View {
         let color = activeState?.color ?? .blue
-        let isSpinning = activeState == .running && isStreaming
+        let isChasing = activeState == .running && isStreaming
 
         ZStack {
-            if isSpinning {
-                // A rotating blue ring (spinner) while the agent is actively
-                // streaming — steadier than the old blink.
-                Circle()
-                    .stroke(color.opacity(0.22), lineWidth: 3)
-                Circle()
-                    .trim(from: 0.0, to: 0.3)
-                    .stroke(color, style: StrokeStyle(lineWidth: 3, lineCap: .round))
-                    .rotationEffect(.degrees(spinning ? 360 : 0))
-                    .shadow(color: color.opacity(0.8), radius: 3)
+            if isChasing {
+                StatusChaseView(color: color)
             } else {
                 Circle()
                     .fill(color)
-                    .frame(width: 18, height: 18)
+                    .frame(width: 16, height: 16)
                     .shadow(color: color.opacity(0.9), radius: 6)
             }
         }
@@ -463,11 +454,57 @@ struct StatusLightView: View {
             RoundedRectangle(cornerRadius: 12)
                 .stroke(.white.opacity(0.18), lineWidth: 1)
         }
-        .onAppear { spinning = true }
-        .animation(
-            isSpinning ? .linear(duration: 1.1).repeatForever(autoreverses: false) : .default,
-            value: spinning
-        )
+    }
+}
+
+/// DSH-style dot-chase: a blue ring of dots where one lit cell sweeps clockwise
+/// around the 3x3 grid rim, one cell (~125ms) at a time, trailing off to dim.
+/// Mirrors DSH's `_dsh-state-dot-chase` animation.
+struct StatusChaseView: View {
+    let color: Color
+
+    // Cell centroids on a 0..8 grid in sweep order (clockwise around the rim).
+    static let cells: [CGPoint] = [
+        .init(x: 2, y: 2), .init(x: 5, y: 2), .init(x: 8, y: 2),
+        .init(x: 8, y: 5), .init(x: 8, y: 8),
+        .init(x: 5, y: 8), .init(x: 2, y: 8), .init(x: 2, y: 5),
+    ]
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 0.06)) { context in
+            ChaseContent(date: context.date, cells: Self.cells, color: color)
+        }
+    }
+}
+
+/// Renders the dot-chase ring for a given animation date; a single lit dot
+/// sweeps clockwise around the 8 rim cells each second.
+private struct ChaseContent: View {
+    let date: Date
+    let cells: [CGPoint]
+    let color: Color
+
+    var body: some View {
+        let phase = date.timeIntervalSinceReferenceDate / 0.125
+        return ZStack {
+            ForEach(Array(cells.enumerated()), id: \.offset) { pair in
+                let i = pair.offset
+                let cell = pair.element
+                let d = Self.ringDistance(Int(i), bright: phase)
+                let intensity = d <= 0.05 ? 1.0 : max(0.14, 1.0 - d / 2.6)
+                Circle()
+                    .fill(color.opacity(intensity))
+                    .frame(width: 4.4, height: 4.4)
+                    .position(x: 3 + cell.x, y: 3 + cell.y)
+            }
+        }
+    }
+
+    /// Ring distance (0..8 cells) of cell `index` from the current bright phase.
+    private static func ringDistance(_ index: Int, bright: Double) -> Double {
+        var d = Double(index) - bright
+        d = (d.truncatingRemainder(dividingBy: 8) + 8).truncatingRemainder(dividingBy: 8)
+        return d
     }
 }
 
