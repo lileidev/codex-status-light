@@ -163,8 +163,11 @@ final class StatusStore: ObservableObject {
     /// directory plus the legacy OpenCode directory, so one app surfaces
     /// Claude, Codex, and OpenCode from their per-agent state files.
     let stateDirectories: [URL]
-    private var cleanupTimer: Timer?
-    private var fsEventStream: FSEventStreamRef?
+    // Nonisolated so deinit (non-MainActor) can tear them down without this
+    // @MainActor class leaking its FSEvents stream / repeating timer on recreate.
+    nonisolated(unsafe) private var cleanupTimer: Timer?
+    nonisolated(unsafe) private var fsEventStream: FSEventStreamRef?
+    private var refreshScheduled = false
     private let decoder: JSONDecoder
 
     init(stateDirectories: [URL] = StatusStore.defaultStateDirectories) {
@@ -177,8 +180,28 @@ final class StatusStore: ObservableObject {
         // 30s is frequent enough to keep the UI tidy while avoiding the cost of
         // the old 0.75s polling loop.
         cleanupTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.refresh() }
+            self?.scheduleRefresh()
         }
+    }
+
+    /// Coalesce refreshes: a fast burst of FSEvents (or the 30s timer) results in
+    /// at most one pending MainActor refresh, instead of queueing one per event.
+    private func scheduleRefresh() {
+        guard !refreshScheduled else { return }
+        refreshScheduled = true
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.refreshScheduled = false
+            self.refresh()
+        }
+    }
+
+    deinit {
+        // Release the FSEvents stream and repeating timer so a recreated store
+        // doesn't leak the Core Foundation stream or keep a 30s timer firing.
+        stopWatching()
+        cleanupTimer?.invalidate()
+        cleanupTimer = nil
     }
 
     static var defaultStateDirectory: URL {
@@ -203,9 +226,7 @@ final class StatusStore: ObservableObject {
         let callback: FSEventStreamCallback = { _, clientCallBackInfo, _, _, _, _ in
             guard let info = clientCallBackInfo else { return }
             let store = Unmanaged<StatusStore>.fromOpaque(info).takeUnretainedValue()
-            Task { @MainActor in
-                store.refresh()
-            }
+            DispatchQueue.main.async { store.scheduleRefresh() }
         }
 
         let paths = stateDirectories.map { $0.path as CFString } as CFArray
@@ -233,7 +254,7 @@ final class StatusStore: ObservableObject {
         }
     }
 
-    private func stopWatching() {
+    nonisolated private func stopWatching() {
         guard let stream = fsEventStream else { return }
         FSEventStreamStop(stream)
         FSEventStreamInvalidate(stream)

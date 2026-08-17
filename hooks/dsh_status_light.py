@@ -154,26 +154,38 @@ _ZSTD_CANDIDATES = (
     ("/usr/local/bin/zstd", ("-dc",)),
 )
 
+# First decompressor that succeeded, cached so subsequent decodes don't re-probe
+# every candidate on each growing-log change.
+_WORKING_DECOMPRESSOR: tuple[str, tuple[str, ...]] | None = None
+
+
 
 def decode_log(path: pathlib.Path) -> list[dict]:
     """Decode a session.jsonl.zstd into a list of event dicts (empty on failure).
 
     ``zstdcat`` is often only on a Homebrew PATH that a Login LaunchAgent does
     not export, so we probe several candidate decompressors, including absolute
-    Homebrew paths and ``zstd -dc``.
+    Homebrew paths and ``zstd -dc``. The first candidate that works is cached so
+    a fast-growing log doesn't re-probe all candidates on every change.
     """
+    global _WORKING_DECOMPRESSOR
     if not path.exists():
         return []
     last_error: str | None = None
-    for cmd, flags in _ZSTD_CANDIDATES:
+    lead = [_WORKING_DECOMPRESSOR] if _WORKING_DECOMPRESSOR else []
+    candidates = lead + list(_ZSTD_CANDIDATES)
+    for cmd, flags in candidates:
         try:
             result = subprocess.run(
-                [cmd, *flags, str(path)], capture_output=True, text=True, timeout=30
+                [cmd, *flags, str(path)], capture_output=True, text=True, timeout=15
             )
         except Exception as exc:
             last_error = str(exc)
             continue
-        if result.returncode == 0 and result.stdout:
+        if result.returncode == 0:
+            # rc==0 means the decompressor worked (stdout may be empty for an
+            # empty log), so both parse and remember it for next time.
+            _WORKING_DECOMPRESSOR = (cmd, tuple(flags))
             return parse_jsonl(result.stdout)
         last_error = result.stderr.strip() or f"zstd rc={result.returncode}"
     _log(f"decode_log: all zstd decompressors failed for {path}: {last_error}")
@@ -613,7 +625,11 @@ def main() -> int:
     cache: dict = {}
 
     def full_scan():
-        for log, session_id in log_entries(root):
+        entries = log_entries(root)
+        current: set = set()
+        for log, session_id in entries:
+            current.add(log)         # Path key (used by `seen`)
+            current.add(str(log))    # str key (used by `cache`)
             process_log(log, session_id, seen, cache)
         # Launch the menu-bar app if DSH has any live session showing. This only
         # happens on a real watch loop (interval), not --once scans.
@@ -622,6 +638,15 @@ def main() -> int:
                 if key[1] == "running":  # state != cleared/done
                     ensure_app_running()
                     break
+        # Prune leaked state: drop `seen`/`cache` entries whose session log no
+        # longer exists on disk. Otherwise a long-lived daemon grows both dicts
+        # unboundedly over time as historical DSH sessions are deleted.
+        for k in list(seen.keys()):
+            if k not in current:
+                seen.pop(k, None)
+        for k in list(cache.keys()):
+            if k not in current:
+                cache.pop(k, None)
 
     if args.once:
         full_scan()

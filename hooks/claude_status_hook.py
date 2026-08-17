@@ -53,10 +53,20 @@ def install_root() -> pathlib.Path:
     ).expanduser()
 
 
+_LOG_MAX_BYTES = 512 * 1024  # rotate hook.log when it exceeds ~512 KB
+
+
 def _log(message: str) -> None:
-    """Append a timestamped line to the hook log for debugging."""
+    """Append a timestamped line to the hook log, rotating it to stay bounded."""
     try:
         log_path = install_root() / "hook.log"
+        try:
+            if log_path.exists() and log_path.stat().st_size > _LOG_MAX_BYTES:
+                rotated = log_path.with_name("hook.log.1")
+                rotated.unlink(missing_ok=True)
+                log_path.rename(rotated)
+        except OSError:
+            pass
         timestamp = dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
         with log_path.open("a", encoding="utf-8") as handle:
             handle.write(f"{timestamp} {message}\n")
