@@ -463,11 +463,12 @@ struct StatusLightView: View {
 struct StatusChaseView: View {
     let color: Color
 
-    // Cell centroids on a 0..8 grid in sweep order (clockwise around the rim).
+    // Cell centroids on a 0..8 grid in sweep order (clockwise around the rim),
+    // matching DSH's original 3x3 edge positions.
     static let cells: [CGPoint] = [
-        .init(x: 2, y: 2), .init(x: 5, y: 2), .init(x: 8, y: 2),
-        .init(x: 8, y: 5), .init(x: 8, y: 8),
-        .init(x: 5, y: 8), .init(x: 2, y: 8), .init(x: 2, y: 5),
+        .init(x: 0, y: 0), .init(x: 4, y: 0), .init(x: 8, y: 0),
+        .init(x: 8, y: 4),
+        .init(x: 8, y: 8), .init(x: 4, y: 8), .init(x: 0, y: 8), .init(x: 0, y: 4),
     ]
 
     var body: some View {
@@ -495,7 +496,9 @@ private struct ChaseContent: View {
                 Circle()
                     .fill(color.opacity(intensity))
                     .frame(width: 4.4, height: 4.4)
-                    .position(x: 3 + cell.x, y: 3 + cell.y)
+                    // Map the 0..8 grid onto a 16x16 square whose side equals the
+                    // steady dot's diameter, so the chase reads at the same size.
+                    .position(x: 4 + cell.x * 2, y: 4 + cell.y * 2)
             }
         }
     }
