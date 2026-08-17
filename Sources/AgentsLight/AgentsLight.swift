@@ -432,30 +432,42 @@ final class StatusStore: ObservableObject {
 struct StatusLightView: View {
     let activeState: LightState?
     let isStreaming: Bool
+    @State private var spinning = false
 
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 0.55)) { context in
-            let runningOn = Int(context.date.timeIntervalSinceReferenceDate / 0.55).isMultiple(of: 2)
-            let color = activeState?.color ?? .green
-            let illuminated: Bool = {
-                guard let activeState else { return false }
-                if activeState == .running && isStreaming {
-                    return runningOn
-                }
-                return true
-            }()
+        let color = activeState?.color ?? .blue
+        let isSpinning = activeState == .running && isStreaming
 
-            Circle()
-                .fill(illuminated ? color : color.opacity(0.14))
-                .frame(width: 24, height: 24)
-                .shadow(color: illuminated ? color.opacity(0.9) : .clear, radius: 6)
-                .padding(6)
-                .background(.black.opacity(0.45), in: RoundedRectangle(cornerRadius: 12))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 12)
-                        .stroke(.white.opacity(0.18), lineWidth: 1)
-                }
+        ZStack {
+            if isSpinning {
+                // A rotating blue ring (spinner) while the agent is actively
+                // streaming — steadier than the old blink.
+                Circle()
+                    .stroke(color.opacity(0.22), lineWidth: 3)
+                Circle()
+                    .trim(from: 0.0, to: 0.3)
+                    .stroke(color, style: StrokeStyle(lineWidth: 3, lineCap: .round))
+                    .rotationEffect(.degrees(spinning ? 360 : 0))
+                    .shadow(color: color.opacity(0.8), radius: 3)
+            } else {
+                Circle()
+                    .fill(color)
+                    .frame(width: 18, height: 18)
+                    .shadow(color: color.opacity(0.9), radius: 6)
+            }
         }
+        .frame(width: 24, height: 24)
+        .padding(6)
+        .background(.black.opacity(0.45), in: RoundedRectangle(cornerRadius: 12))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(.white.opacity(0.18), lineWidth: 1)
+        }
+        .onAppear { spinning = true }
+        .animation(
+            isSpinning ? .linear(duration: 1.1).repeatForever(autoreverses: false) : .default,
+            value: spinning
+        )
     }
 }
 
