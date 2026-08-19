@@ -179,19 +179,14 @@ def _parent_process_name() -> str | None:
 def _session_id(event: dict) -> str:
     """Return a stable session ID for this Claude Code invocation.
 
-    Prefer the parent process PID when the parent is actually a Claude Code
-    process. Using a PID lets the Swift app clean up sessions whose owning
-    Claude Code process has exited (the same mechanism Codex uses), instead of
-    leaving every transcript UUID to linger while any agent runs. Fall back to
-    the transcript UUID when the parent is not Claude.
+    Always the Claude transcript session id (UUID). Using a PID with a UUID
+    fallback was unstable across the hook events of one session (the parent-pid
+    probe sometimes hits and sometimes misses), so a single interactive session
+    was split into two status rows. The UUID is constant for the whole session,
+    so one session = one row. The parent gate in main() still means only
+    interactive Claude sessions write; stale UUID rows are pruned by the app
+    (anyAgentProcessRunning + the 12h stale threshold).
     """
-    try:
-        name = _parent_process_name()
-        if name == "claude":
-            return str(os.getppid())
-    except Exception as exc:
-        _log(f"_session_id: ppid probe error {exc}")
-
     session = event.get("session_id") or os.environ.get("CLAUDE_SESSION_ID")
     if session:
         return str(session)
