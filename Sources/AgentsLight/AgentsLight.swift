@@ -153,7 +153,13 @@ struct SessionState: Codable, Identifiable, Equatable {
     }
 }
 
-private let staleSessionThreshold: TimeInterval = 43_200  // 12 hours
+/// Terminal states (done/error) are short-lived: once a session ends we
+/// don't want the row to stick around for hours.
+private let terminalSessionTimeout: TimeInterval = 600   // 10 minutes
+/// Active states can legitimately run for a while, but if they haven't
+/// updated in 30 minutes the agent is likely hung or the hook missed an
+/// event, so treat them as zombies.
+private let activeSessionTimeout: TimeInterval = 1_800   // 30 minutes
 
 @MainActor
 final class StatusStore: ObservableObject {
@@ -405,18 +411,20 @@ final class StatusStore: ObservableObject {
     ///   status bridge) — tag it before the UUID/process heuristics run.
     /// - Numeric IDs are PIDs (Codex and OpenCode): resolve the live process
     ///   name.
-    /// - Non-numeric IDs fall back to Claude Code transcript UUIDs.
+    /// - Claude Code hooks prefix their source with ``"hook:"`` (e.g.
+    ///   ``"hook:SessionEnd"``) — use that as the most reliable signal.
+    /// - Otherwise return ``nil`` so the session falls back to the broad
+    ///   ``anyAgentProcessRunning()`` check rather than wrongly pinning it to
+    ///   Claude when there is no evidence.
     private func agent(for sessionID: String, source: String?) -> Agent? {
-        // Explicit source tags written by the status hooks / bridge are the most
-        // reliable signal. Codex emits `codex`, DSH emits `dsh`; a bare `hook:...`
-        // source is a Claude session (Claude's hook reports its transcript UUID).
         if let src = source?.lowercased() {
             if src == "codex" { return .codex }
             if src == "dsh" { return .dsh }
             if src == "opencode" { return .opencode }
+            if src.hasPrefix("hook:") { return .claude }
         }
         guard let pid = pid_t(sessionID), let name = processName(for: pid) else {
-            return .claude  // UUID transcript belongs to Claude Code
+            return nil
         }
         if name.lowercased().contains("codex") { return .codex }
         if name.lowercased().contains("opencode") { return .opencode }
@@ -451,15 +459,33 @@ final class StatusStore: ObservableObject {
                     continue
                 }
 
+                // Time-based safety net: even if the agent process still exists,
+                // a session that hasn't updated in a long time is likely a zombie
+                // (e.g. Claude Code exited without firing SessionEnd).
+                let age = now.timeIntervalSince(state.updatedAt)
+                if state.state == .done || state.state == .error {
+                    if age > terminalSessionTimeout {
+                        try? FileManager.default.removeItem(at: url)
+                        continue
+                    }
+                } else if age > activeSessionTimeout {
+                    try? FileManager.default.removeItem(at: url)
+                    continue
+                }
+
                 pairs.append((state, url))
             }
         }
 
         sessions = pairs.map { $0.state }.sorted { $0.updatedAt > $1.updatedAt }
 
-        // Clean up very old session files so the directories do not grow forever.
+        // Final sweep: remove anything that slipped through and is now well
+        // past its per-state timeout.
         for (state, url) in pairs {
-            if now.timeIntervalSince(state.updatedAt) > staleSessionThreshold {
+            let age = now.timeIntervalSince(state.updatedAt)
+            if (state.state == .done || state.state == .error) && age > terminalSessionTimeout {
+                try? FileManager.default.removeItem(at: url)
+            } else if age > activeSessionTimeout {
                 try? FileManager.default.removeItem(at: url)
             }
         }

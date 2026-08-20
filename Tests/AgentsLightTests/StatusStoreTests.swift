@@ -382,8 +382,8 @@ struct StatusStoreTests {
 
         store.refresh()
 
-        #expect(store.sessions.count == 1)
-        #expect(FileManager.default.fileExists(atPath: url.path) == false, "files older than 12 hours should be removed")
+        #expect(store.sessions.isEmpty, "done sessions older than the terminal timeout should be removed immediately")
+        #expect(FileManager.default.fileExists(atPath: url.path) == false, "stale done session file should be deleted")
     }
 
     @Test func removesSessionFileForDeadProcess() throws {
