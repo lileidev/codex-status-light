@@ -20,7 +20,7 @@ import shutil
 # Events that mirror the Codex integration's state machine, mapped to Claude
 # Code's hook vocabulary. PermissionRequest and Notification cover Claude's
 # "waiting for user" states; PostToolUse covers running/error; Stop covers done.
-HOOK_EVENTS = ("SessionStart", "UserPromptSubmit", "PermissionRequest", "Notification", "PostToolUse", "Stop")
+HOOK_EVENTS = ("SessionStart", "UserPromptSubmit", "PermissionRequest", "Notification", "PostToolUse", "SessionEnd", "Stop")
 
 
 def merge_hooks(existing: dict, addition: dict) -> dict:
