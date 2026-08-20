@@ -457,16 +457,54 @@ def is_subagent_session(events: list[dict]) -> bool:
     status-light row, cluttering the light (1 parent + N subagent rows per task).
     The status watcher skips them; only the root/parent session is surfaced.
     """
+    return _parent_session_id(events) is not None
+
+
+def _parent_session_id(events: list[dict]) -> str | None:
+    """The parent session id if this DSH session is a subagent, else None."""
     for e in events:
         if e.get("type") != "session":
             continue
-        if isinstance(e.get("parentSession"), str) and e["parentSession"]:
-            return True
-        data = e.get("data", {})
-        if isinstance(data, dict) and isinstance(data.get("parentSession"), str) \
-                and data["parentSession"]:
-            return True
-    return False
+        for src in (e, e.get("data", {})):
+            if isinstance(src, dict) and isinstance(src.get("parentSession"), str) \
+                    and src["parentSession"]:
+                return src["parentSession"]
+    return None
+
+
+# parent-session-id -> number of currently-running subagents, rebuilt each full
+# scan so a parent row can surface "· N 子代理运行中" without adding rows.
+_subagent_active_counts: dict[str, int] = {}
+_last_effective_message: dict[str, str] = {}
+
+
+def _effective_session_message(session_id: str, base: str) -> str:
+    """Append an active-subagent suffix when this parent has running children."""
+    n = _subagent_active_counts.get(session_id, 0)
+    if n > 0 and base:
+        return f"{base} · {n} 子代理运行中"
+    return base
+
+
+def _rebuild_subagent_counts(root: pathlib.Path, now: float) -> None:
+    """Recompute {parent_session_id: running-subagent-count} from active logs.
+
+    Only logs written within the active window are considered (a subagent that
+    hasn't written in a while isn't running); that keeps decode costs bounded.
+    """
+    counts: dict[str, int] = {}
+    for entry, session_id in log_entries(root):
+        try:
+            if (now - entry.stat().st_mtime) > ACTIVE_WINDOW_SECONDS:
+                continue  # inactive: skip (and avoid decoding it)
+        except OSError:
+            continue
+        events = decode_log(entry)
+        parent = _parent_session_id(events) if events else None
+        if parent:
+            counts[parent] = counts.get(parent, 0) + 1
+    _subagent_active_counts.clear()
+    _subagent_active_counts.update(counts)
 
 
 def emit(state: str, session_id: str, message: str, is_streaming: bool = False, cwd: str = "") -> None:
@@ -569,13 +607,17 @@ def process_log(log_path: pathlib.Path, session_id: str, seen: dict, cache: dict
         cache.pop(key, None)
         return
 
-    if not changed:
-        # Alive but unchanged since its last emission: nothing new to surface.
-        seen[log_path] = marker
-        return
-
+    # Build the effective row values (fresh when the log changed, otherwise the
+    # cached ones) and surface a running-subagent suffix on the parent's message.
+    if changed:
+        cur = (state, message, streaming, cwd)
+    else:
+        cur = (cached[1], cached[2], cached[3], cached[4])
+    eff_message = _effective_session_message(session_id, cur[1])
+    if _last_effective_message.get(session_id) != eff_message:
+        _last_effective_message[session_id] = eff_message
+        emit(cur[0], session_id, eff_message, cur[2], cwd=cur[3])
     seen[log_path] = marker
-    emit(state, session_id, message, streaming, cwd=cwd)
 
 
 _app_running_cache: tuple[bool, float] | None = None
@@ -652,11 +694,13 @@ def main() -> int:
     cache: dict = {}
 
     def full_scan():
+        _rebuild_subagent_counts(root, time.time())
         entries = log_entries(root)
         current: set = set()
         for log, session_id in entries:
             current.add(log)         # Path key (used by `seen`)
             current.add(str(log))    # str key (used by `cache`)
+            current.add(session_id)  # session-id key (used by _last_effective_message)
             process_log(log, session_id, seen, cache)
         # Launch the menu-bar app if DSH has any live session showing. This only
         # happens on a real watch loop (interval), not --once scans.
@@ -674,6 +718,9 @@ def main() -> int:
         for k in list(cache.keys()):
             if k not in current:
                 cache.pop(k, None)
+        for sid in list(_last_effective_message.keys()):
+            if sid not in current:
+                _last_effective_message.pop(sid, None)
 
     if args.once:
         full_scan()

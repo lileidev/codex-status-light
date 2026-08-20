@@ -60,6 +60,26 @@ class DshBridgeTests(unittest.TestCase):
             {"type": "user/message"},
         ]))
 
+    def test_effective_message_appends_active_subagent_suffix(self):
+        # A parent with running subagents surfaces a suffix on its row message
+        # (without adding separate rows).
+        try:
+            module._subagent_active_counts["parent-p"] = 2
+            self.assertIn("2 子代理运行中",
+                          module._effective_session_message("parent-p", "DSH is working"))
+        finally:
+            module._subagent_active_counts.clear()
+        # No active children: no suffix.
+        self.assertEqual(module._effective_session_message("parent-x", "DSH is working"),
+                         "DSH is working")
+
+    def test_parent_session_id_reads_top_level_and_data(self):
+        self.assertEqual(module._parent_session_id(
+            [{"type": "session", "parentSession": "abc"}]), "abc")
+        self.assertEqual(module._parent_session_id(
+            [{"type": "session", "data": {"parentSession": "abc"}}]), "abc")
+        self.assertIsNone(module._parent_session_id([{"type": "session"}]))
+
     def test_session_establishes_running(self):
         state, message, streaming, last = module.status_for([
             ev("session", 1000, {"id": "s1", "cwd": "/foo"}),
