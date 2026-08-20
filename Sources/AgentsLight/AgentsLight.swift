@@ -310,10 +310,10 @@ final class StatusStore: ObservableObject {
 
     /// Returns `true` when the session ID represents a live agent session.
     /// Numeric IDs are treated as PIDs and checked directly. Non-numeric IDs
-    /// (e.g. transcript UUIDs or "manual") are kept only when at least one
-    /// supported agent process is still running; this prevents stale UUID
-    /// sessions from lingering after the owning agent exits.
-    private func isAgentProcessAlive(sessionID: String) -> Bool {
+    /// (e.g. transcript UUIDs or "manual") are checked against the specific
+    /// agent that created the session, so a running Codex/OpenCode process
+    /// does not keep stale Claude sessions alive.
+    private func isAgentProcessAlive(sessionID: String, source: String?) -> Bool {
         if let pid = pid_t(sessionID) {
             // A session file is only ever created by an agent hook using the
             // agent's own PID, so liveness is simply "is that process alive".
@@ -325,9 +325,20 @@ final class StatusStore: ObservableObject {
             return kill(pid, 0) == 0
         }
 
-        // Non-numeric session id: keep it only if any supported agent runs, or if
-        // DSH itself is actively writing session logs (see anyDshSessionRunning).
-        return anyAgentProcessRunning() || anyDshSessionRunning()
+        // Non-numeric session id: check liveness of the owning agent only.
+        let resolvedAgent = agent(for: sessionID, source: source)
+        switch resolvedAgent {
+        case .dsh:
+            return anyDshSessionRunning()
+        case .claude:
+            return doesAnyProcessExist(["claude"])
+        case .codex:
+            return doesAnyProcessExist(["codex"])
+        case .opencode:
+            return doesAnyProcessExist(["opencode"])
+        case .none:
+            return anyAgentProcessRunning() || anyDshSessionRunning()
+        }
     }
 
     private func anyAgentProcessRunning() -> Bool {
@@ -345,8 +356,14 @@ final class StatusStore: ObservableObject {
     /// DSH rows visible while DSH is in use, and lets them age out (stale-removal
     /// below) once DSH closes.
     private func anyDshSessionRunning() -> Bool {
-        let dshHome = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".dsh/sessions", isDirectory: true)
+        let dshHome: URL
+        if let env = ProcessInfo.processInfo.environment["DSH_HOME"] {
+            dshHome = URL(fileURLWithPath: (env as NSString).expandingTildeInPath)
+                .appendingPathComponent("sessions", isDirectory: true)
+        } else {
+            dshHome = FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".dsh/sessions", isDirectory: true)
+        }
         guard let enumerator = FileManager.default.enumerator(
             at: dshHome, includingPropertiesForKeys: [.contentModificationDateKey],
             options: [.skipsHiddenFiles]
@@ -429,7 +446,7 @@ final class StatusStore: ObservableObject {
                 state.agent = agent(for: state.sessionID, source: state.source)
 
                 // Remove sessions whose owning agent process has already exited.
-                if !isAgentProcessAlive(sessionID: state.sessionID) {
+                if !isAgentProcessAlive(sessionID: state.sessionID, source: state.source) {
                     try? FileManager.default.removeItem(at: url)
                     continue
                 }

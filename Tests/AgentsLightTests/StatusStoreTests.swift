@@ -11,6 +11,19 @@ struct StatusStoreTests {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
 
+        // Create a fake DSH home so anyDshSessionRunning() sees an active log.
+        let dshHome = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let dshSessions = dshHome.appendingPathComponent("sessions", isDirectory: true)
+        let fakeLog = dshSessions
+            .appendingPathComponent("ws", isDirectory: true)
+            .appendingPathComponent("sess-1", isDirectory: true)
+            .appendingPathComponent("session.jsonl.zstd")
+        try FileManager.default.createDirectory(at: fakeLog.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data().write(to: fakeLog)
+        setenv("DSH_HOME", dshHome.path, 1)
+        defer { unsetenv("DSH_HOME") }
+
         let store = StatusStore(stateDirectories: [directory])
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
