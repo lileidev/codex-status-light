@@ -93,6 +93,24 @@ class ClaudeStatusHookTests(unittest.TestCase):
         })
         self.assertEqual(self.read_state()["state"], "running")
 
+    def test_waiting_then_answer_never_stuck_on_waiting(self):
+        # Regression: emit used to fork an async CLI subprocess per event, so a
+        # stale "waiting" write could land AFTER the newer "running" write,
+        # leaving the light stuck on yellow. Emit is now synchronous, so a burst
+        # of events must always end on the last event's state.
+        for _ in range(10):
+            target = self.directory / "state" / "transcript-abc.json"
+            if target.exists():
+                os.unlink(target)
+            self.run_hook(dict(BASE, hook_event_name="PermissionRequest", tool_name="Bash"))
+            self.run_hook({
+                "hook_event_name": "PostToolUse",
+                "session_id": "transcript-abc",
+                "tool_name": "Bash",
+                "tool_response": {"is_error": False},
+            })
+            self.assertEqual(self.read_state()["state"], "running")
+
     def test_stop_sets_done(self):
         self.run_hook(dict(BASE, hook_event_name="SessionStart"))
         self.run_hook({
@@ -107,6 +125,18 @@ class ClaudeStatusHookTests(unittest.TestCase):
             "hook_event_name": "Notification",
             "session_id": "transcript-abc",
             "notification": {"subtype": "blocking", "message": "Waiting for approval"},
+        })
+        self.assertEqual(self.read_state()["state"], "waiting")
+
+    def test_notification_permission_prompt_treated_as_waiting(self):
+        # Claude Code 2.1 sends `notification_type` (e.g. "permission_prompt")
+        # rather than `notification.subtype`; the hook must still treat it as
+        # waiting so the light shows yellow and clears on the user's answer.
+        self.run_hook({
+            "hook_event_name": "Notification",
+            "session_id": "transcript-abc",
+            "notification_type": "permission_prompt",
+            "message": "Claude needs your permission",
         })
         self.assertEqual(self.read_state()["state"], "waiting")
 

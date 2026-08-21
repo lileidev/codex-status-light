@@ -265,7 +265,16 @@ def current_state(session_id: str) -> str | None:
 
 
 def emit(state: str, message: str, event: dict, is_streaming: bool = False) -> None:
-    """Write a state update asynchronously so the Claude hook does not block."""
+    """Write a state update to the shared status light.
+
+    Runs synchronously so each write completes before the next event is
+    handled. Claude Code invokes one hook (one event) at a time, so a
+    synchronous write guarantees the on-disk status reflects the *last* event
+    (e.g. yellow waiting -> blue running) in order. Forking an async subprocess
+    per event previously let a stale "waiting" write finish after a newer
+    "running" write and leave the light stuck on yellow. The CLI call is small
+    (~30ms), well within the hook timeout.
+    """
     command = _command()
     if not command.exists():
         _log(f"emit: CLI not found at {command}")
@@ -287,14 +296,15 @@ def emit(state: str, message: str, event: dict, is_streaming: bool = False) -> N
 
     _log(f"emit: state={state} session={session_id} streaming={is_streaming}")
     try:
-        subprocess.Popen(
+        subprocess.run(
             args,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            start_new_session=True,
+            timeout=10,
+            check=False,
         )
     except Exception as exc:
-        _log(f"emit: spawn error {exc}")
+        _log(f"emit: error {exc}")
 
 
 def set_state(session_id: str, state: str, message: str, event: dict, is_streaming: bool = False) -> None:
@@ -373,8 +383,18 @@ def main() -> int:
         set_state(session_id, "waiting", f"Approval needed: {tool}", event)
     elif name == "Notification":
         notification = event.get("notification") or {}
-        subtype = (notification.get("subtype") if isinstance(notification, dict) else None) or event.get("subtype") or ""
-        if isinstance(subtype, str) and subtype.lower() in _WAITING_SUBTYPES:
+        notification = notification if isinstance(notification, dict) else {}
+        # Claude Code provides the kind both as `notification.subtype` and (in
+        # newer releases, e.g. 2.1.x) as top-level `notification_type` with
+        # values like "permission_prompt". Read whichever is present.
+        subtype = (
+            notification.get("type")
+            or notification.get("subtype")
+            or event.get("notification_type")
+            or event.get("subtype")
+            or ""
+        )
+        if isinstance(subtype, str) and (subtype.lower() in _WAITING_SUBTYPES or subtype in {"permission_prompt", "question_prompt"}):
             _awaiting_input.add(session_id)
             set_state(session_id, "waiting", _question_header(event), event)
         elif isinstance(subtype, str) and subtype.lower() in _ERROR_SUBTYPES:

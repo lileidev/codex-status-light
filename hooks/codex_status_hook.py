@@ -270,7 +270,16 @@ def current_state(session_id: str) -> str | None:
 
 
 def emit(state: str, message: str, event: dict, is_streaming: bool = False) -> None:
-    """Write a state update asynchronously so the Codex hook does not block."""
+    """Write a state update to the shared status light.
+
+    Runs synchronously so each write completes before the next event is
+    handled. Codex fires each hook (one event) per invocation, so a synchronous
+    write guarantees the on-disk status reflects the *last* event (e.g. yellow
+    waiting -> blue running) in order. Forking an async subprocess per event
+    previously let a stale "waiting" write finish after a newer "running" write
+    and leave the light stuck on yellow. The CLI call is small (~30ms), well
+    within the hook timeout.
+    """
     command = _command()
     if not command.exists():
         _log(f"emit: CLI not found at {command}")
@@ -292,14 +301,15 @@ def emit(state: str, message: str, event: dict, is_streaming: bool = False) -> N
 
     _log(f"emit: state={state} session={session_id} streaming={is_streaming}")
     try:
-        subprocess.Popen(
+        subprocess.run(
             args,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            start_new_session=True,
+            timeout=10,
+            check=False,
         )
     except Exception as exc:
-        _log(f"emit: spawn error {exc}")
+        _log(f"emit: error {exc}")
 
 
 def set_state(session_id: str, state: str, message: str, event: dict, is_streaming: bool = False) -> None:
