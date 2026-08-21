@@ -37,8 +37,10 @@ Each agent's installer adds its own integration (a command hook for Claude/Codex
 an OpenCode plugin, or a DSH session-log watcher), so one app serves every agent.
 
 Only **interactive** sessions are shown: the Claude and Codex hooks skip any
-invocation whose parent process is not `claude`/`codex`, so sessions driven
-programmatically by other tools (e.g. Obsidian Copilot) and CI never appear.
+invocation whose parent process is not `claude`/`codex`. Because Obsidian and
+editors spawn a *real* `claude` binary, the Claude hook also walks Claude's own
+ancestry and skips sessions embedded inside a host app (Obsidian, VS Code,
+Copilot, an SDK harness) or CI, so only user-terminal sessions surface.
 OpenCode uses a real process PID (auto-pruned on exit), and DSH sessions use an
 activity window (see below), so neither needs a parent-process filter.
 

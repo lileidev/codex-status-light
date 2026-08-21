@@ -176,6 +176,73 @@ def _parent_process_name() -> str | None:
         return None
 
 
+# Host executables that, when an ancestor of a `claude` process, mean that
+# Claude is being driven programmatically (Copilot / embedded SDK) rather than
+# from a user's interactive terminal. Such sessions would otherwise clutter the
+# status light and never get pruned.
+_EMBEDDED_HOST_HINTS = (
+    "obsidian",
+    "electron",
+    "code",  # VS Code
+    "cursor",
+    "windsurf",
+    "copilot",
+    "chatgpt",
+    "codex",
+    "agent-host",
+    "sdk-cache",
+)
+
+
+def _ancestor_command_names(max_depth: int = 10) -> list[str]:
+    """Return the (lowercased) executable names of the calling process's ancestors.
+
+    Starts at the Claude process (this hook's parent, i.e. Claude Code) and
+    walks up to `max_depth` levels so we can tell whether the Claude was
+    launched interactively (parented by a user shell/terminal) or embedded
+    inside a host app (Obsidian, an editor, an SDK harness)."""
+    names: list[str] = []
+    pid = os.getppid()
+    for _ in range(max_depth):
+        try:
+            result = subprocess.run(
+                ["/bin/ps", "-p", str(pid), "-o", "ppid=", "-o", "comm="],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            if result.returncode != 0:
+                break
+            line = result.stdout.strip()
+            if not line:
+                break
+            parts = line.split(None, 1)
+            if len(parts) != 2:
+                break
+            names.append(parts[1].lower())
+            nxt = parts[0]
+            if nxt == "1":
+                break
+            pid = int(nxt)
+        except Exception:
+            break
+    return names
+
+
+def _is_embedded_session() -> bool:
+    """Whether this Claude Code session is driven by an embedding host program.
+
+    An interactive `claude` from a terminal is parented by a shell or a
+    terminal app; Obsidian / Copilot / VS Code / SDK Claude is parented by that
+    host app. The hook's direct parent is always the `claude` binary, so we
+    must look at Claude's own ancestry to tell the two apart.
+    """
+    for command in _ancestor_command_names():
+        if any(hint in command for hint in _EMBEDDED_HOST_HINTS):
+            return True
+    return False
+
+
 def _session_id(event: dict) -> str:
     """Return a stable session ID for this Claude Code invocation.
 
@@ -365,6 +432,9 @@ def main() -> int:
         parent = os.environ["CLAUDE_STATUS_LIGHT_PARENT"]
     if parent != "claude":
         _log(f"main: skipping (parent not claude, got {parent!r}) — event={name}")
+        return 0
+    if not os.environ.get("CLAUDE_STATUS_LIGHT_PARENT") and _is_embedded_session():
+        _log(f"main: skipping embedded session (Obsidian/Copilot/editor) — event={name}")
         return 0
 
     ensure_app_running()

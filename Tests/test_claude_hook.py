@@ -190,6 +190,37 @@ class ClaudeStatusHookTests(unittest.TestCase):
         self.assertFalse(target.exists(),
                          "Obsidian/external Claude hooks must not write a status row")
 
+    def test_embedded_obsidian_parent_is_skipped(self):
+        # Obsidian Copilot launches a REAL `claude` binary, so the hook's direct
+        # parent IS "claude"; the "not claude" gate alone misses it. We must look
+        # at Claude's own ancestry: if an Obsidian/editor host is above it, the
+        # session is embedded and must not surface on the status light.
+        import unittest.mock
+        spec = importlib.util.spec_from_file_location("claude_hook_embed", HOOK)
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(module)
+        with unittest.mock.patch.object(
+            module, "_ancestor_command_names",
+            return_value=["claude", "obsidian helper (renderer)", "obsidian"],
+        ):
+            self.assertTrue(module._is_embedded_session())
+
+    def test_interactive_shell_parent_not_skipped(self):
+        # A real interactive `claude` launched from a user's terminal is parented
+        # by a shell, so its ancestry contains no embedded host and must NOT be
+        # treated as an embedded session.
+        import unittest.mock
+        spec = importlib.util.spec_from_file_location("claude_hook_shell", HOOK)
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(module)
+        with unittest.mock.patch.object(
+            module, "_ancestor_command_names",
+            return_value=["claude", "zsh", "/bin/zsh", "login"],
+        ):
+            self.assertFalse(module._is_embedded_session())
+
 
 if __name__ == "__main__":
     unittest.main()
