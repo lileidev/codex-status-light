@@ -36,6 +36,7 @@ def write_state(
     source: str = "cli",
     state_dir: pathlib.Path | None = None,
     is_streaming: bool = False,
+    process_id: int | None = None,
 ) -> pathlib.Path:
     if state not in VALID_STATES:
         raise ValueError(f"Invalid state {state!r}. Must be one of {VALID_STATES}")
@@ -53,6 +54,12 @@ def write_state(
         "updated_at": dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z"),
         "source": source,
         "is_streaming": is_streaming,
+        # Optional per-session owner PID. When present the menu-bar app prunes
+        # *this* row by checking whether this PID is still alive, instead of
+        # falling back to "is any agent process running". The Claude hook passes
+        # its parent Claude PID here; Codex/OpenCode identify themselves by PID
+        # in session_id instead and leave this absent.
+        "process_id": process_id,
     }
 
     fd, temporary = tempfile.mkstemp(prefix=".status-", suffix=".json", dir=state_dir)
@@ -92,6 +99,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--source", default="cli")
     parser.add_argument("--state-dir", default=str(cli_state_dir()))
     parser.add_argument("--streaming", action="store_true", help="When state is running, indicate the assistant is actively streaming output")
+    parser.add_argument("--pid", type=int, help="Owner process id used for liveness pruning (e.g. the parent Claude PID)")
     parser.add_argument("--clear", action="store_true", help="Remove this session's status file")
     parser.add_argument("--quiet", action="store_true", help="Suppress non-error output")
     return parser
@@ -120,6 +128,7 @@ def main() -> int:
         source=args.source,
         state_dir=state_dir,
         is_streaming=args.streaming,
+        process_id=args.pid,
     )
     if not args.quiet:
         print(path)

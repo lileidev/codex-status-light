@@ -26,6 +26,31 @@ class StatusLightTests(unittest.TestCase):
             self.assertEqual(state["state"], "waiting")
             self.assertEqual(state["message"], "Need input")
 
+    def test_cli_stores_owner_pid_when_provided(self):
+        with tempfile.TemporaryDirectory() as directory:
+            subprocess.run(
+                [str(CLI), "waiting", "--session", "sess", "--pid", "9876", "--state-dir", directory],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            state = json.loads((pathlib.Path(directory) / "sess.json").read_text())
+            self.assertEqual(state["process_id"], 9876)
+
+    def test_cli_defaults_owner_pid_to_none(self):
+        # Codex/OpenCode call without --pid and rely on a numeric session_id for
+        # liveness; an absent process_id must serialize as null, not the CLI's
+        # own (short-lived) parent pid, or the app would wrongly prune them.
+        with tempfile.TemporaryDirectory() as directory:
+            subprocess.run(
+                [str(CLI), "running", "--session", "sess", "--state-dir", directory],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            state = json.loads((pathlib.Path(directory) / "sess.json").read_text())
+            self.assertIsNone(state["process_id"])
+
     def test_hook_failure_detection(self):
         spec = importlib.util.spec_from_file_location("status_hook", HOOK)
         module = importlib.util.module_from_spec(spec)

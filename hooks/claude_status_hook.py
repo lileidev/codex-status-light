@@ -354,6 +354,7 @@ def emit(state: str, message: str, event: dict, is_streaming: bool = False) -> N
         "--message", message,
         "--cwd", str(event.get("cwd") or os.getcwd()),
         "--source", f"hook:{event.get('hook_event_name', 'unknown')}",
+        "--pid", str(os.getppid()),
         "--quiet",
     ]
     if event.get("turn_id"):

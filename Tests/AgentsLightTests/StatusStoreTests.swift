@@ -416,6 +416,74 @@ struct StatusStoreTests {
         #expect(FileManager.default.fileExists(atPath: url.path) == false, "dead process session file should be deleted")
     }
 
+    @Test func prunesStaleClaudeByOwnerPidEvenWhileAnotherClaudeRuns() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let store = StatusStore(stateDirectories: [directory])
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+
+        // Simulate a dead Claude transcript: a UUID session id with a source
+        // hook-prefix (so agent() maps to .claude) but a process_id that no
+        // longer exists. Killing the "any claude running" check would keep it
+        // alive whenever *some* Claude is open; the per-session PID must prune it.
+        let stale = SessionState(
+            sessionID: "dead-transcript-uuid",
+            state: .waiting,
+            message: "Claude needs input",
+            cwd: "/tmp/proj",
+            updatedAt: Date(),
+            turnID: nil,
+            source: "hook:Notification",
+            isStreaming: false,
+            processID: 999999
+        )
+        let data = try encoder.encode(stale)
+        let url = directory.appendingPathComponent("dead-transcript-uuid.json")
+        try data.write(to: url)
+
+        store.refresh()
+
+        #expect(store.sessions.isEmpty, "stale Claude session with a dead process_id should be pruned even while other Claude sessions run")
+        #expect(FileManager.default.fileExists(atPath: url.path) == false, "stale Claude session file should be deleted")
+    }
+
+    @Test func keepsSessionWhoseProcessIDIsAlive() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let store = StatusStore(stateDirectories: [directory])
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+
+        // A process_id pointing at a live process (this test runner itself) must
+        // keep the session around rather than pruning it.
+        let live = SessionState(
+            sessionID: "live-transcript-uuid",
+            state: .waiting,
+            message: "Claude needs input",
+            cwd: "/tmp/proj",
+            updatedAt: Date(),
+            turnID: nil,
+            source: "hook:Notification",
+            isStreaming: false,
+            processID: Int32(ProcessInfo.processInfo.processIdentifier)
+        )
+        let data = try encoder.encode(live)
+        let url = directory.appendingPathComponent("live-transcript-uuid.json")
+        try data.write(to: url)
+
+        store.refresh()
+
+        #expect(store.sessions.count == 1, "session whose process_id is alive should be kept")
+        #expect(FileManager.default.fileExists(atPath: url.path), "live session file should be preserved")
+    }
+
     @Test func keepsSessionFileForNonNumericSessionID() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)

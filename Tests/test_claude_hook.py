@@ -66,6 +66,16 @@ class ClaudeStatusHookTests(unittest.TestCase):
         self.run_hook(BASE)
         self.assertEqual(self.read_state()["state"], "running")
 
+    def test_state_records_owner_pid_for_liveness(self):
+        # The hook writes its parent (the Claude process) PID so the menu-bar
+        # app can prune this exact transcript once that Claude exits, rather
+        # than relying on "any claude running".
+        self.run_hook(BASE)
+        recorded = self.read_state()["process_id"]
+        # The hook is a child of pytest here; os.getppid() is a real live PID.
+        self.assertIsInstance(recorded, int)
+        self.assertGreater(recorded, 0)
+
     def test_permission_request_sets_waiting(self):
         event = dict(BASE, hook_event_name="PermissionRequest", tool_name="Bash")
         self.run_hook(event)

@@ -91,6 +91,12 @@ struct SessionState: Codable, Identifiable, Equatable {
     var turnID: String?
     var source: String?
     var isStreaming: Bool = false
+    /// Owner process id written by the Claude hook (its parent Claude PID).
+    /// When present, liveness is pinned to *this* process via `kill(pid, 0)`,
+    /// so a Claude transcript that has exited is pruned even while other
+    /// Claude sessions keep running. Codex/OpenCode identify themselves by PID
+    /// in ``sessionID`` instead and leave this nil.
+    var processID: Int32?
     /// Resolved by StatusStore.refresh(); not persisted in the state file.
     var agent: Agent?
 
@@ -105,6 +111,7 @@ struct SessionState: Codable, Identifiable, Equatable {
         case turnID = "turn_id"
         case source
         case isStreaming = "is_streaming"
+        case processID = "process_id"
     }
 
     init(
@@ -115,7 +122,8 @@ struct SessionState: Codable, Identifiable, Equatable {
         updatedAt: Date,
         turnID: String?,
         source: String?,
-        isStreaming: Bool = false
+        isStreaming: Bool = false,
+        processID: Int32? = nil
     ) {
         self.sessionID = sessionID
         self.state = state
@@ -125,6 +133,7 @@ struct SessionState: Codable, Identifiable, Equatable {
         self.turnID = turnID
         self.source = source
         self.isStreaming = isStreaming
+        self.processID = processID
         agent = nil
     }
 
@@ -138,6 +147,7 @@ struct SessionState: Codable, Identifiable, Equatable {
         turnID = try container.decodeIfPresent(String.self, forKey: .turnID)
         source = try container.decodeIfPresent(String.self, forKey: .source)
         isStreaming = try container.decodeIfPresent(Bool.self, forKey: .isStreaming) ?? false
+        processID = try container.decodeIfPresent(Int32.self, forKey: .processID)
         agent = nil
     }
 
@@ -319,8 +329,12 @@ final class StatusStore: ObservableObject {
     /// (e.g. transcript UUIDs or "manual") are checked against the specific
     /// agent that created the session, so a running Codex/OpenCode process
     /// does not keep stale Claude sessions alive.
-    private func isAgentProcessAlive(sessionID: String, source: String?) -> Bool {
-        if let pid = pid_t(sessionID) {
+    private func isAgentProcessAlive(sessionID: String, source: String?, processID: Int32?) -> Bool {
+        // Per-session owner PID (written by the Claude hook): pin liveness to
+        // *this* process. A numeric session_id is the agent's own PID and is
+        // checked the same way. This is what lets a Claude transcript that has
+        // exited be cleaned up even while other claude sessions keep running.
+        if let pid = (processID ?? pid_t(sessionID)), pid > 0 {
             // A session file is only ever created by an agent hook using the
             // agent's own PID, so liveness is simply "is that process alive".
             // We must NOT require the process name here: the Claude Code
@@ -434,6 +448,22 @@ final class StatusStore: ObservableObject {
     func refresh() {
         let now = Date()
 
+        // Clean up stale atomic-write temp files (0-byte hidden JSON) that
+        // crashes or forced exits may have left behind.
+        for directory in stateDirectories {
+            guard let urls = try? FileManager.default.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: nil,
+                options: []
+            ) else { continue }
+            for url in urls where url.lastPathComponent.hasPrefix(".") && url.pathExtension == "json" {
+                if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+                   let size = attrs[.size] as? UInt64, size == 0 {
+                    try? FileManager.default.removeItem(at: url)
+                }
+            }
+        }
+
         var pairs: [(state: SessionState, url: URL)] = []
         for directory in stateDirectories {
             guard let urls = try? FileManager.default.contentsOfDirectory(
@@ -454,7 +484,7 @@ final class StatusStore: ObservableObject {
                 state.agent = agent(for: state.sessionID, source: state.source)
 
                 // Remove sessions whose owning agent process has already exited.
-                if !isAgentProcessAlive(sessionID: state.sessionID, source: state.source) {
+                if !isAgentProcessAlive(sessionID: state.sessionID, source: state.source, processID: state.processID) {
                     try? FileManager.default.removeItem(at: url)
                     continue
                 }
