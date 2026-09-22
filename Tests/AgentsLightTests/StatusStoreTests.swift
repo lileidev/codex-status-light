@@ -12,13 +12,15 @@ struct StatusStoreTests {
         defer { try? FileManager.default.removeItem(at: directory) }
 
         // Create a fake DSH home so anyDshSessionRunning() sees an active log.
+        // Current DSH writes generation-tagged names (v3), not the version-zero
+        // name, so the liveness probe must recognize them.
         let dshHome = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         let dshSessions = dshHome.appendingPathComponent("sessions", isDirectory: true)
         let fakeLog = dshSessions
             .appendingPathComponent("ws", isDirectory: true)
             .appendingPathComponent("sess-1", isDirectory: true)
-            .appendingPathComponent("session.jsonl.zstd")
+            .appendingPathComponent("session.v3.jsonl.zstd")
         try FileManager.default.createDirectory(at: fakeLog.deletingLastPathComponent(), withIntermediateDirectories: true)
         try Data().write(to: fakeLog)
         setenv("DSH_HOME", dshHome.path, 1)
@@ -52,6 +54,19 @@ struct StatusStoreTests {
         #expect(loaded.sessionID == dshSession.sessionID)
         #expect(loaded.agent == .dsh, "source == dsh should tag the row as the DSH agent")
         #expect(loaded.isStreaming == true)
+    }
+
+    @Test func recognizesEveryDshLogGeneration() {
+        // Version zero and every generation-tagged name DSH may append to.
+        #expect(StatusStore.isDshSessionLogFilename("session.jsonl.zstd"))
+        #expect(StatusStore.isDshSessionLogFilename("session.v3.jsonl.zstd"))
+        #expect(StatusStore.isDshSessionLogFilename("session.v12.jsonl.zstd"))
+        #expect(StatusStore.isDshSessionLogFilename("session.v3.jsonl"))
+        // Non-log artifacts and malformed generations must not count.
+        #expect(!StatusStore.isDshSessionLogFilename("session.jsonl.zstd.tmp"))
+        #expect(!StatusStore.isDshSessionLogFilename("session.lock"))
+        #expect(!StatusStore.isDshSessionLogFilename("session.v.jsonl.zstd"))
+        #expect(!StatusStore.isDshSessionLogFilename("other.jsonl.zstd"))
     }
 
     @Test func codexSourceSessionIsTaggedCodex() throws {

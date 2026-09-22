@@ -267,6 +267,45 @@ class DshBridgeTests(unittest.TestCase):
             self.assertEqual(len(entries), 1)
             self.assertEqual(entries[0][1], "session-uuid-1")
 
+    def test_log_entries_supports_v3_only_session(self):
+        # DSH migrated to generation-tagged filenames; a session created after
+        # the upgrade has only session.v3.jsonl.zstd and must still be found.
+        with tempfile.TemporaryDirectory() as root:
+            base = pathlib.Path(root)
+            ws = base / "ws" / "session-uuid-2"
+            ws.mkdir(parents=True)
+            v3 = ws / "session.v3.jsonl.zstd"
+            v3.write_bytes(b"x")
+            entries = module.log_entries(base)
+            self.assertEqual(entries, [(v3, "session-uuid-2")])
+
+    def test_log_entries_prefers_newest_generation(self):
+        # When both the legacy v0 name and a tagged generation exist, the newest
+        # generation is the one DSH appends to, so it must win.
+        with tempfile.TemporaryDirectory() as root:
+            base = pathlib.Path(root)
+            ws = base / "ws" / "session-uuid-3"
+            ws.mkdir(parents=True)
+            (ws / "session.jsonl.zstd").write_bytes(b"stale")
+            v3 = ws / "session.v3.jsonl.zstd"
+            v3.write_bytes(b"live")
+            v5 = ws / "session.v5.jsonl.zstd"
+            v5.write_bytes(b"newer")
+            entries = module.log_entries(base)
+            self.assertEqual(entries, [(v5, "session-uuid-3")])
+
+    def test_log_entries_supports_plaintext_generation(self):
+        # Compression is configurable, so an untagged zstd suffix is not the
+        # only accepted encoding for a tagged generation.
+        with tempfile.TemporaryDirectory() as root:
+            base = pathlib.Path(root)
+            ws = base / "ws" / "session-uuid-4"
+            ws.mkdir(parents=True)
+            v3 = ws / "session.v3.jsonl"
+            v3.write_bytes(b"{}")
+            entries = module.log_entries(base)
+            self.assertEqual(entries, [(v3, "session-uuid-4")])
+
     @unittest.skipUnless(shutil.which("zstd"), "zstd not installed")
     def test_decode_log_zstd(self):
         import subprocess as sp

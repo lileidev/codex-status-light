@@ -170,6 +170,13 @@ private let terminalSessionTimeout: TimeInterval = 600   // 10 minutes
 /// updated in 30 minutes the agent is likely hung or the hook missed an
 /// event, so treat them as zombies.
 private let activeSessionTimeout: TimeInterval = 1_800   // 30 minutes
+/// How stale a DSH durable session log may be and still count as "DSH is
+/// active". The v3 durable format only advances at step granularity (it no
+/// longer persists per-chunk stream events), so one deep-reasoning step can be
+/// silent for minutes; a short mtime cutoff would cull a live row mid-turn.
+/// This matches the active-session window, while the watcher's own
+/// active/deep-hold windows stay authoritative for clearing rows.
+private let dshLogIdleWindow: TimeInterval = activeSessionTimeout
 
 @MainActor
 final class StatusStore: ObservableObject {
@@ -371,10 +378,12 @@ final class StatusStore: ObservableObject {
     ///
     /// DSH runs under generic ``node``, so there is no stable process name to
     /// pgrep. Instead we treat DSH as alive whenever one of its persisted
-    /// ``$DSH_HOME/sessions/**/session.jsonl.zstd`` logs changed within a short
-    /// window — a live turn writes events continuously. This keeps per-session
-    /// DSH rows visible while DSH is in use, and lets them age out (stale-removal
-    /// below) once DSH closes.
+    /// durable session logs changed within a recent window — a live turn keeps
+    /// advancing the log. Log names are generation-tagged (``session.jsonl.zstd``
+    /// for format v0, ``session.vN.jsonl.zstd`` for later generations), and DSH
+    /// only appends to the newest generation, so every generation must be
+    /// recognized. This keeps per-session DSH rows visible while DSH is in use,
+    /// and lets them age out (stale-removal below) once DSH closes.
     private func anyDshSessionRunning() -> Bool {
         let dshHome: URL
         if let env = ProcessInfo.processInfo.environment["DSH_HOME"] {
@@ -388,9 +397,10 @@ final class StatusStore: ObservableObject {
             at: dshHome, includingPropertiesForKeys: [.contentModificationDateKey],
             options: [.skipsHiddenFiles]
         ) else { return false }
-        let cutoff = Date().addingTimeInterval(-90)  // ~90s of no DSH writes => idle
+        let cutoff = Date().addingTimeInterval(-dshLogIdleWindow)
         var found = false
-        for case let url as URL in enumerator where url.lastPathComponent == "session.jsonl.zstd" {
+        for case let url as URL in enumerator
+        where Self.isDshSessionLogFilename(url.lastPathComponent) {
             if let date = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate,
                date > cutoff {
                 found = true
@@ -398,6 +408,22 @@ final class StatusStore: ObservableObject {
             }
         }
         return found
+    }
+
+    /// Whether ``name`` is one of DSH's durable session-log artifacts:
+    /// the version-zero ``session.jsonl.zstd`` or a generation-tagged
+    /// ``session.vN.jsonl.zstd`` (DSH appends only to the newest generation
+    /// after a format migration). The plaintext ``.jsonl`` suffix is accepted
+    /// too, matching DSH's configurable JSONL encoding.
+    nonisolated static func isDshSessionLogFilename(_ name: String) -> Bool {
+        guard let suffix = [".jsonl.zstd", ".jsonl"].first(where: { name.hasSuffix($0) }) else {
+            return false
+        }
+        let stem = String(name.dropLast(suffix.count))
+        if stem == "session" { return true }
+        guard stem.hasPrefix("session.v") else { return false }
+        let version = stem.dropFirst("session.v".count)
+        return !version.isEmpty && version.allSatisfy { $0.isNumber }
     }
 
     /// Returns whether `pgrep` finds at least one process named in `names`.

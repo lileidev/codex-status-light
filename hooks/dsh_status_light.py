@@ -2,8 +2,11 @@
 """Drive the shared AgentsLight status light from DeepSeek Harness (DSH).
 
 DSH persists every session to a durable, zstd-compressed JSONL event log under
-``$DSH_HOME/sessions/<workspace-slug>/<session-id>/session.jsonl.zstd``. This
-watcher tails those logs, translates the type-tagged event stream into the
+``$DSH_HOME/sessions/<workspace-slug>/<session-id>/``. The filename is
+generation-tagged: ``session.jsonl.zstd`` (format v0) or
+``session.vN.jsonl.zstd`` for later format generations (``session.v3.jsonl.zstd``
+today), and only the newest generation is appended to. This watcher tails the
+newest generation per session, translates the type-tagged event stream into the
 shared ``agents-light`` CLI, and lands status files in the same
 ``~/.agents-status-light/sessions`` directory that Codex, Claude Code, and
 OpenCode drive. No modification to DSH itself is required.
@@ -98,28 +101,57 @@ def sessions_root(base: pathlib.Path | None = None) -> pathlib.Path:
     return (base or dsh_home()) / "sessions"
 
 
+# DSH names its durable session artifacts after an immutable "session format
+# generation": version 0 keeps the original untagged ``session.jsonl.zstd``
+# name, while every later generation carries a lowercase numeric tag
+# (``session.v3.jsonl.zstd``). DSH migrates a session forward and appends only
+# to the newest generation, so a watcher that hard-codes the version-zero name
+# silently stops seeing sessions after a format upgrade.
+_GENERATION_LOG_RE = re.compile(r"^session(?:\.v(\d+))?\.jsonl(?:\.zstd)?$")
+
+
+def _newest_log(directory: pathlib.Path) -> pathlib.Path | None:
+    """The newest session-format generation artifact in one session directory.
+
+    The highest ``vN`` generation wins when present (that is where DSH appends
+    after a migration); the untagged version-zero name is the fallback for
+    sessions that have not been migrated. Both the zstd and plaintext suffixes
+    are recognized, matching DSH's configurable JSONL encoding.
+    """
+    best: tuple[int, pathlib.Path] | None = None
+    for entry in directory.iterdir():
+        match = _GENERATION_LOG_RE.match(entry.name)
+        if not match or not entry.is_file():
+            continue
+        version = int(match.group(1)) if match.group(1) is not None else 0
+        if best is None or version > best[0]:
+            best = (version, entry)
+    return best[1] if best else None
+
+
 def log_entries(root: pathlib.Path) -> list[tuple[pathlib.Path, str]]:
-    """Every ``(session.jsonl.zstd, session_id)`` under the DSH sessions tree.
+    """Every ``(durable session log, session_id)`` under the DSH sessions tree.
 
     DSH nests one level of workspace slugs, then one level of session ids, each
-    containing a single ``session.jsonl.zstd``. We use the session directory's
-    name (the DSH session UUID) as the status-light session id so concurrent
-    DSH sessions become distinct rows. Some setups write the log directly under
-    the workspace level; there we fall back to the workspace-id path.
+    holding one durable log per format generation; we pick that session's newest
+    generation. We use the session directory's name (the DSH session UUID) as
+    the status-light session id so concurrent DSH sessions become distinct rows.
+    Some setups write the log directly under the workspace level; there we fall
+    back to the workspace-id path.
     """
     entries: list[tuple[pathlib.Path, str]] = []
     try:
         for first in root.iterdir():
             if not first.is_dir():
                 continue
-            direct = first / "session.jsonl.zstd"
-            if direct.exists():
+            direct = _newest_log(first)
+            if direct is not None:
                 entries.append((direct, _sanitize(first.name)))
                 continue
             for second in first.iterdir():
                 if second.is_dir():
-                    log = second / "session.jsonl.zstd"
-                    if log.exists():
+                    log = _newest_log(second)
+                    if log is not None:
                         entries.append((log, _sanitize(second.name)))
     except OSError:
         return []
@@ -161,7 +193,7 @@ _WORKING_DECOMPRESSOR: tuple[str, tuple[str, ...]] | None = None
 
 
 def decode_log(path: pathlib.Path) -> list[dict]:
-    """Decode a session.jsonl.zstd into a list of event dicts (empty on failure).
+    """Decode a durable session log into a list of event dicts (empty on failure).
 
     ``zstdcat`` is often only on a Homebrew PATH that a Login LaunchAgent does
     not export, so we probe several candidate decompressors, including absolute

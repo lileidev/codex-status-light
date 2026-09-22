@@ -3,7 +3,8 @@
 
 DSH has no command hook like Codex/Claude, so instead of registering lifecycle
 hooks we deploy a small watcher that tails DSH's durable session logs
-(``$DSH_HOME/sessions/**/session.jsonl.zstd``) and drives the shared
+(``$DSH_HOME/sessions/**/session.jsonl.zstd`` plus the generation-tagged
+``session.vN.jsonl.zstd`` names DSH now appends to) and drives the shared
 ``agents-light`` CLI. It writes one status file per DSH session into the shared
 ``~/.agents-status-light/sessions`` directory the menu-bar app already watches,
 so DSH rows appear side-by-side with Codex, Claude, and OpenCode.

@@ -78,7 +78,10 @@ turn start, permission requests, tool errors, and turn completion.
 
 DSH has no command hook like Codex/Claude, so instead this project watches DSH's
 durable session logs directly. DSH persists every session as a zstd-compressed
-JSONL file (`$DSH_HOME/sessions/<workspace>/<session>/session.jsonl.zstd`);
+JSONL file under `$DSH_HOME/sessions/<workspace>/<session>/` whose name is
+generation-tagged: `session.jsonl.zstd` (format v0) or `session.vN.jsonl.zstd`
+for later format generations (`session.v3.jsonl.zstd` today), and DSH appends
+only to the newest generation, so the watcher reads that one;
 `hooks/dsh_status_light.py` tails those logs and writes one status file per DSH
 session into the shared state directory, so each root (parent) DSH session shows
 up as its own row (tagged with DeepSeek's blue whale icon, rendered from
@@ -106,15 +109,17 @@ The login LaunchAgent keeps the watcher running; to run it manually:
 ```
 
 State mapping: a DSH `user/message`, `turn/start`, `step/start`, or `tool/call`
-turns the light blue, blinking while the model is streaming output (a chunk
-landed within a recent window, so sustained generation keeps blinking even when
-the tail of the log is momentarily a tool event); a **deep dive** (`reasoning-chunks`
-with no visible output after it) also keeps it blue/streaming and labels the turn
-"DSH is deep diving" instead of looking idle; an unanswered
-`ask_user_question`/`request_user_input` tool call or a pending sandbox approval
-(`approval/asked` with no matching `approval/decided`) turns it yellow; a
+turns the light blue; a **deep dive** (`reasoning-chunks` with no visible output
+after it) labels the turn "DSH is deep diving" instead of looking idle; an
+unanswered `ask_user_question`/`request_user_input` tool call or a pending sandbox
+approval (`approval/asked` with no matching `approval/decided`) turns it yellow; a
 `turn/end` reported with an error/blocked reason turns it red; a `turn/end` with
-a completed reason, or a turn that goes quiet, turns it green.
+a completed reason, or a turn that goes quiet, turns green.
+
+Note: DSH's v3 durable log no longer persists the per-chunk stream events
+(`assistant/chunk`, `reasoning-chunks`) that older logs carried, so a v3 DSH row
+shows solid blue while a step runs rather than the blinking dot-chase reserved
+for agents whose hooks still stream chunks. State colors remain accurate.
 
 Only **recently active** DSH sessions are shown: a DSH session whose log has not
 been written for `DSH_ACTIVE_WINDOW_SECONDS` seconds (default 180, i.e. 3
