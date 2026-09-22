@@ -12,10 +12,15 @@
  */
 
 import { spawn } from "node:child_process";
+import { access, constants, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
 const CLI = join(homedir(), ".agents-status-light", "bin", "agents-light");
+const APP_PATH = join(homedir(), "Applications", "AgentsLight.app");
+const LAUNCH_LOCK = join(homedir(), ".agents-status-light", ".opencode-launch-lock");
+const LAUNCH_COOLDOWN_MS = 10_000;
+const APP_RUNNING_CACHE_TTL_MS = 5_000;
 
 // Each OpenCode process gets its own stable session id so multiple concurrent
 // instances do not overwrite each other's status light. Using process.pid keeps
@@ -34,6 +39,58 @@ let pendingCall = null;
 let debounceTimer = null;
 const DEBOUNCE_MS = 150;
 
+let appRunningCache = null;
+
+async function isAppRunning() {
+  const now = Date.now();
+  if (appRunningCache && now - appRunningCache.at < APP_RUNNING_CACHE_TTL_MS) {
+    return appRunningCache.value;
+  }
+  try {
+    const child = spawn("/usr/bin/pgrep", ["-x", "AgentsLight"], { stdio: "pipe" });
+    let stdout = "";
+    child.stdout.on("data", (d) => { stdout += d; });
+    await new Promise((resolve) => child.on("close", resolve));
+    const value = child.exitCode === 0;
+    appRunningCache = { value, at: now };
+    return value;
+  } catch {
+    return false;
+  }
+}
+
+async function ensureAppRunning() {
+  if (await isAppRunning()) return;
+
+  try {
+    const s = await stat(LAUNCH_LOCK);
+    if (Date.now() - s.mtimeMs < LAUNCH_COOLDOWN_MS) return;
+  } catch {
+    // lock does not exist
+  }
+
+  try {
+    let cmd;
+    try {
+      await access(APP_PATH, constants.F_OK);
+      cmd = ["/usr/bin/open", "-g", APP_PATH];
+    } catch {
+      cmd = ["/usr/bin/open", "-g", "-a", "AgentsLight"];
+    }
+    const child = spawn(cmd[0], cmd.slice(1), { stdio: "ignore", detached: true });
+    child.unref();
+  } catch {
+    // Best-effort: ignore launch failures.
+  }
+
+  try {
+    await writeFile(LAUNCH_LOCK, "");
+  } catch {
+    // ignore
+  }
+  appRunningCache = { value: true, at: Date.now() };
+}
+
 function callCli(state, message, isStreaming = false) {
   pendingCall = { state, message, isStreaming };
   if (debounceTimer) return;
@@ -47,7 +104,7 @@ function callCli(state, message, isStreaming = false) {
     const args = [
       call.state,
       "--session", SESSION_ID,
-      "--source", "plugin",
+      "--source", "opencode",
       "--message", call.message,
       "--quiet",
     ];
@@ -98,7 +155,8 @@ export const StatusLightPlugin = async () => {
 
       switch (type) {
         case "session.created":
-          // New session means work is starting.
+          // New session means work is starting. Make sure the menu-bar app is running.
+          await ensureAppRunning();
           await setState("running", "OpenCode is working");
           break;
 

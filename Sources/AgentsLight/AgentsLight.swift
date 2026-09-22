@@ -435,6 +435,7 @@ final class StatusStore: ObservableObject {
             if src == "codex" { return .codex }
             if src == "dsh" { return .dsh }
             if src == "opencode" { return .opencode }
+            if src == "plugin" { return .opencode }
             if src.hasPrefix("hook:") { return .claude }
         }
         guard let pid = pid_t(sessionID), let name = processName(for: pid) else {
