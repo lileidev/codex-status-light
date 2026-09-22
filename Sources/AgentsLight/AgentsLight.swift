@@ -748,6 +748,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusWindow: NSPanel?
     private var cancellables = Set<AnyCancellable>()
 
+    /// A borderless floating panel whose controls actually accept clicks.
+    ///
+    /// A plain `NSPanel` with `.nonactivatingPanel` never becomes the key window
+    /// on its own, so SwiftUI `Button`s placed inside it never receive the mouse
+    /// click — the close (xmark) button did nothing. By letting the panel become
+    /// key (and clearing `becomesKeyOnlyIfNeeded`) clicks land on the buttons.
+    /// `canBecomeMain` stays false so it never steals the app's main window.
+    private final class FloatingStatusPanel: NSPanel {
+        override var canBecomeKey: Bool { true }
+        override var canBecomeMain: Bool { false }
+    }
+
     /// Height needed to show all sessions without scrolling.
     /// - One session / idle row needs about 120 pt.
     /// - Each additional session adds roughly one row height.
@@ -773,7 +785,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func showWindow() {
         if statusWindow == nil {
             let height = windowHeight(for: store.displaySessions.count)
-            let window = NSPanel(
+            let window = FloatingStatusPanel(
                 contentRect: NSRect(x: 0, y: 0, width: 260, height: height),
                 styleMask: [.borderless, .nonactivatingPanel],
                 backing: .buffered,
@@ -788,7 +800,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             window.backgroundColor = .clear
             window.isFloatingPanel = true
             window.hidesOnDeactivate = false
-            window.becomesKeyOnlyIfNeeded = true
+            // Become key on click so the SwiftUI close button receives the mouse
+            // event (see FloatingStatusPanel.canBecomeKey). Ignoring key status
+            // left the xmark button dead.
+            window.becomesKeyOnlyIfNeeded = false
             window.isReleasedWhenClosed = false
             window.isMovableByWindowBackground = true
             window.hasShadow = true
