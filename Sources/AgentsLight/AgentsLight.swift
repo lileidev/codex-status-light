@@ -769,7 +769,7 @@ struct FloatingWindowAccessor: NSViewRepresentable {
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let store = StatusStore()
     private var statusWindow: NSPanel?
     private var cancellables = Set<AnyCancellable>()
@@ -833,20 +833,104 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             window.isReleasedWhenClosed = false
             window.isMovableByWindowBackground = true
             window.hasShadow = true
-            let targetScreen = NSScreen.screens.first ?? NSScreen.main
-            if let visibleFrame = targetScreen?.visibleFrame {
-                let origin = NSPoint(
-                    x: visibleFrame.maxX - window.frame.width - 24,
-                    y: visibleFrame.maxY - height - 24
+            // Restore the spot the user last dragged it to, falling back to the
+            // top-right default only on first run or when the saved spot is no
+            // longer on a connected display.
+            let size = NSSize(width: window.frame.width, height: height)
+            let restored: NSRect
+            if let topLeft = savedPanelTopLeft() {
+                let candidate = NSRect(
+                    x: topLeft.x,
+                    y: topLeft.y - size.height,
+                    width: size.width,
+                    height: size.height
                 )
-                window.setFrameOrigin(origin)
+                restored = frameIsOnScreen(candidate) ? candidate : defaultPanelFrame(size: size)
             } else {
-                window.center()
+                restored = defaultPanelFrame(size: size)
             }
+            window.setFrame(restored, display: false)
+            window.delegate = self
             statusWindow = window
         }
 
         statusWindow?.orderFrontRegardless()
+    }
+
+    /// The user's chosen top-left of the floating panel, persisted across app
+    /// launches. The panel position is otherwise recomputed at creation, and the
+    /// app is auto-launched on every boot, so without this it snaps back to the
+    /// primary screen's top-right corner each time the machine restarts.
+    private static let panelTopLeftDefaultsKey = "AgentsLightPanelTopLeft"
+
+    private func savedPanelTopLeft() -> NSPoint? {
+        guard let saved = UserDefaults.standard.dictionary(forKey: Self.panelTopLeftDefaultsKey),
+              let x = Self.number(saved["x"]),
+              let y = Self.number(saved["y"]) else { return nil }
+        return NSPoint(x: CGFloat(x), y: CGFloat(y))
+    }
+
+    /// Accept numbers as well as numeric strings: the app always writes
+    /// ``Double``, but a value seeded by hand via `defaults write … -dict`
+    /// lands as a string.
+    private static func number(_ value: Any?) -> Double? {
+        if let double = value as? Double { return double }
+        if let int = value as? Int { return Double(int) }
+        if let string = value as? String { return Double(string) }
+        return nil
+    }
+
+    /// Remember the window's top-left (not its origin): ``resizeWindow`` keeps
+    /// the top edge fixed while the height follows the session count, so the
+    /// top-left is the stable point the user actually positions.
+    private func rememberPanelTopLeft(from window: NSWindow) {
+        let frame = window.frame
+        UserDefaults.standard.set(
+            ["x": Double(frame.minX), "y": Double(frame.maxY)],
+            forKey: Self.panelTopLeftDefaultsKey
+        )
+    }
+
+    /// True when enough of ``frame`` lands on a connected display that the panel
+    /// is not stranded off-screen after a display is unplugged or rearranged.
+    private func frameIsOnScreen(_ frame: NSRect) -> Bool {
+        NSScreen.screens.contains { screen in
+            let overlap = screen.visibleFrame.intersection(frame)
+            return !overlap.isNull && overlap.width >= 40 && overlap.height >= 40
+        }
+    }
+
+    /// The default spot: 24 pt inside the primary screen's top-right corner.
+    private func defaultPanelFrame(size: NSSize) -> NSRect {
+        let targetScreen = NSScreen.screens.first ?? NSScreen.main
+        guard let visibleFrame = targetScreen?.visibleFrame else {
+            return NSRect(origin: .zero, size: size)
+        }
+        return NSRect(
+            x: visibleFrame.maxX - size.width - 24,
+            y: visibleFrame.maxY - size.height - 24,
+            width: size.width,
+            height: size.height
+        )
+    }
+
+    // MARK: - NSWindowDelegate
+
+    func windowDidMove(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow else { return }
+        rememberPanelTopLeft(from: window)
+    }
+
+    func windowDidResize(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow else { return }
+        rememberPanelTopLeft(from: window)
+    }
+
+    /// A menu-bar utility must stay alive when its floating panel is closed;
+    /// otherwise the next agent event relaunches the app and the panel lands at
+    /// the default top-right position again.
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false
     }
 
     private func resizeWindow() {
