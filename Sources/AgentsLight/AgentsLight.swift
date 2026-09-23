@@ -806,6 +806,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.resizeWindow() }
             .store(in: &cancellables)
+
+        // Display sleep/wake and monitor reconfiguration make macOS relocate
+        // windows (off a sleeping display, onto the built-in one), so re-assert
+        // the spot the user chose once the arrangement has settled again.
+        let workspaceCenter = NSWorkspace.shared.notificationCenter
+        workspaceCenter.addObserver(
+            self, selector: #selector(screenConfigurationChanged),
+            name: NSWorkspace.screensDidWakeNotification, object: nil
+        )
+        workspaceCenter.addObserver(
+            self, selector: #selector(screenConfigurationChanged),
+            name: NSWorkspace.didWakeNotification, object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(screenConfigurationChanged),
+            name: NSApplication.didChangeScreenParametersNotification, object: nil
+        )
     }
 
     func showWindow() {
@@ -914,15 +931,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         )
     }
 
+    // MARK: - Screen changes
+
+    /// A waking display can rejoin a beat after the wake notification, so give
+    /// the arrangement a moment to settle before re-asserting the position.
+    @objc private func screenConfigurationChanged(_ notification: Notification) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            self?.restoreSavedPanelPosition()
+        }
+    }
+
+    /// Move the panel back to the remembered top-left when that spot is on a
+    /// connected display again. A no-op while the target display is still
+    /// absent, so an unplugged monitor never strands the panel off-screen.
+    private func restoreSavedPanelPosition() {
+        guard let window = statusWindow, let topLeft = savedPanelTopLeft() else { return }
+        let frame = window.frame
+        let candidate = NSRect(
+            x: topLeft.x,
+            y: topLeft.y - frame.height,
+            width: frame.width,
+            height: frame.height
+        )
+        guard frameIsOnScreen(candidate) else { return }
+        guard abs(frame.minX - candidate.minX) > 0.5 || abs(frame.maxY - candidate.maxY) > 0.5 else {
+            return
+        }
+        window.setFrame(candidate, display: true)
+    }
+
     // MARK: - NSWindowDelegate
+
+    /// When the current/most recent user drag started. Programmatic and system
+    /// relocations (display sleep/wake, screen reconfiguration) never set it, so
+    /// they cannot overwrite the spot the user actually chose.
+    private var lastUserDragAt: Date?
+
+    func windowWillMove(_ notification: Notification) {
+        guard NSEvent.pressedMouseButtons != 0 else { return }
+        lastUserDragAt = Date()
+    }
 
     func windowDidMove(_ notification: Notification) {
         guard let window = notification.object as? NSWindow else { return }
-        rememberPanelTopLeft(from: window)
-    }
-
-    func windowDidResize(_ notification: Notification) {
-        guard let window = notification.object as? NSWindow else { return }
+        // Persist while the user is dragging, plus a short grace period so a
+        // final move posted just after mouse-up still lands. A system relocation
+        // minutes later falls outside the window and is ignored.
+        let dragging = NSEvent.pressedMouseButtons != 0
+        let justDragged = lastUserDragAt.map { Date().timeIntervalSince($0) < 1.5 } ?? false
+        guard dragging || justDragged else { return }
         rememberPanelTopLeft(from: window)
     }
 
