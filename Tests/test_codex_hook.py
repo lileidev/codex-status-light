@@ -47,13 +47,35 @@ class CodexHookSessionIdTests(unittest.TestCase):
         ):
             self.assertEqual(module._parent_process_name(), "zsh")
 
-    def test_session_id_uses_stable_parent_pid_when_parent_is_codex(self):
-        # When the parent is the Codex process, _session_id must return the
-        # (stable) PID, NOT the event's session_id which varies across hooks —
-        # this is what kept one Codex window producing two status rows.
+    def test_session_id_prefers_event_id_over_shared_daemon_pid(self):
+        # Codex's app-server runs every hook inside one shared daemon, so the
+        # parent PID is the same for all sessions. The event's session_id is the
+        # stable, per-session identity and must win, or every window collapses
+        # into a single status row.
+        with mock.patch("codex_status_hook.os.getppid", return_value=26850), \
+             mock.patch("codex_status_hook._parent_process_name", return_value="codex"):
+            sid = module._session_id({"session_id": "01a0c7ea-757d-7e21-91f6-a5de84b8e794"})
+        self.assertEqual(sid, "01a0c7ea-757d-7e21-91f6-a5de84b8e794")
+
+    def test_two_sessions_sharing_a_parent_pid_get_distinct_ids(self):
+        with mock.patch("codex_status_hook.os.getppid", return_value=26850), \
+             mock.patch("codex_status_hook._parent_process_name", return_value="codex"):
+            first = module._session_id({"session_id": "01a0c7ea-757d-7e21-91f6-a5de84b8e794"})
+            second = module._session_id({"session_id": "01a0d2ab-9b39-7063-8e0d-6487251cce3c"})
+        self.assertNotEqual(first, second)
+
+    def test_session_id_falls_back_to_transcript_stem(self):
+        with mock.patch("codex_status_hook._parent_process_name", return_value="codex"):
+            sid = module._session_id({
+                "transcript_path": "/Users/x/.codex/sessions/2026/09/22/"
+                                   "rollout-2026-09-22T15-00-26-01a0c7ea-757d-7e21-91f6-a5de84b8e794.jsonl"
+            })
+        self.assertEqual(sid, "rollout-2026-09-22T15-00-26-01a0c7ea-757d-7e21-91f6-a5de84b8e794")
+
+    def test_session_id_uses_parent_pid_when_event_has_no_identity(self):
         with mock.patch("codex_status_hook.os.getppid", return_value=5923), \
              mock.patch("codex_status_hook._parent_process_name", return_value="codex"):
-            sid = module._session_id({"session_id": "019ffdc6-052d-7c20-a086-8d6bc2cfedc7"})
+            sid = module._session_id({})
         self.assertEqual(sid, "5923")
 
     def test_session_id_falls_back_to_event_id_when_parent_not_codex(self):
@@ -93,3 +115,20 @@ class CodexHookSessionIdTests(unittest.TestCase):
              mock.patch("codex_status_hook.ensure_app_running"):
             module.main()
         set_state.assert_called()
+
+    def test_main_session_end_clears_the_row(self):
+        # A closed window must drop its row; with UUID ids the app can no longer
+        # prune it by process liveness, so SessionEnd is the cleanup path.
+        import io
+        import json
+        event = json.dumps({"hook_event_name": "SessionEnd",
+                            "session_id": "01a0c7ea-757d-7e21-91f6-a5de84b8e794"})
+        with mock.patch("codex_status_hook.sys.stdin", io.StringIO(event)), \
+             mock.patch("codex_status_hook._parent_process_name", return_value="codex"), \
+             mock.patch("codex_status_hook.clear_session") as clear_session, \
+             mock.patch("codex_status_hook.set_state") as set_state, \
+             mock.patch("codex_status_hook.ensure_app_running"):
+            rc = module.main()
+        self.assertEqual(rc, 0)
+        clear_session.assert_called_once_with("01a0c7ea-757d-7e21-91f6-a5de84b8e794")
+        set_state.assert_not_called()

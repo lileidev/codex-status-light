@@ -180,28 +180,35 @@ def _session_id(event: dict) -> str:
     """Return a stable session ID for this Codex invocation.
 
     Order of preference:
-      1. ``CODEX_SESSION_ID`` env var — Codex injects this and it is stable for
-         the whole of a single Codex session, so every hook event maps to one
-         row. (Codex's ``event.session_id`` alone is NOT stable across events,
-         which previously split one window into several status rows.)
-      2. The parent process PID, when the parent really is a Codex process —
-         lets the Swift app clean up rows once that process exits.
-      3. Codex's ``session_id`` from the event, as a last resort.
+      1. ``CODEX_SESSION_ID`` env var — an explicit override when Codex sets it.
+      2. The event's ``session_id`` — stable for a whole session and distinct
+         per session. This is required with Codex's app-server architecture:
+         hooks run inside one shared ``codex app-server`` daemon, so the parent
+         PID is the *same* for every session and would collapse every window
+         into a single status row.
+      3. The event's ``transcript_path`` stem (the rollout file), also stable
+         and unique per session.
+      4. The parent process PID, only when it really is a per-session ``codex``
+         process and the event carried no session identity.
     """
     env_id = os.environ.get("CODEX_SESSION_ID")
     if env_id:
         return str(env_id)
-    try:
-        if _parent_process_name() == "codex":
-            # The parent is the Codex process itself, so its PID is a stable
-            # per-window id: every hook event of one Codex run maps to one row.
-            return str(os.getppid())
-    except Exception as exc:
-        _log(f"_session_id: ppid probe error {exc}")
-
     session = event.get("session_id")
     if session:
         return str(session)
+    transcript = event.get("transcript_path")
+    if transcript:
+        stem = pathlib.Path(str(transcript)).stem
+        if stem:
+            return stem
+    try:
+        if _parent_process_name() == "codex":
+            # Older Codex spawned one `codex` process per session, so its PID is
+            # a stable per-window id and the app can prune the row on exit.
+            return str(os.getppid())
+    except Exception as exc:
+        _log(f"_session_id: ppid probe error {exc}")
     return "manual"
 
 
@@ -312,6 +319,29 @@ def emit(state: str, message: str, event: dict, is_streaming: bool = False) -> N
         _log(f"emit: error {exc}")
 
 
+def clear_session(session_id: str) -> None:
+    """Remove a session's status row (used when Codex reports SessionEnd).
+
+    Rows are now keyed by the session UUID rather than a per-session PID, so the
+    app can no longer prune them by process liveness; clearing on SessionEnd is
+    what removes a closed window immediately instead of leaving a stale row.
+    """
+    command = _command()
+    if not command.exists():
+        return
+    _log(f"clear: session={session_id}")
+    try:
+        subprocess.run(
+            [str(command), "--clear", "--session", session_id, "--quiet"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+            check=False,
+        )
+    except Exception as exc:
+        _log(f"clear: error {exc}")
+
+
 def set_state(session_id: str, state: str, message: str, event: dict, is_streaming: bool = False) -> None:
     """Write a state update, mirroring opencode-status-light's setState guards."""
     if session_id in _awaiting_input and state not in ("waiting", "error"):
@@ -407,6 +437,14 @@ def main() -> int:
         _awaiting_input.discard(session_id)
         if current_state(session_id) != "error":
             set_state(session_id, "done", "Codex turn completed", event)
+    elif name == "SessionEnd":
+        # The window closed: drop its row instead of leaving a stale one, which
+        # matters now that the id is a session UUID the app cannot PID-prune.
+        _current_state.pop(session_id, None)
+        _current_streaming.pop(session_id, None)
+        _last_tool_time.pop(session_id, None)
+        _awaiting_input.discard(session_id)
+        clear_session(session_id)
     return 0
 
 

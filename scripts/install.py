@@ -17,7 +17,7 @@ import plistlib
 import shutil
 import subprocess
 
-HOOK_EVENTS = ("SessionStart", "UserPromptSubmit", "PermissionRequest", "PreToolUse", "PostToolUse", "Stop")
+HOOK_EVENTS = ("SessionStart", "UserPromptSubmit", "PermissionRequest", "PreToolUse", "PostToolUse", "Stop", "SessionEnd")
 
 
 def merge_hooks(existing: dict, addition: dict) -> dict:
