@@ -244,14 +244,34 @@ def _log(message: str) -> None:
 
 
 def _tool_result_call_ids(data) -> list[str]:
-    ids = []
+    """Call ids resolved by one ``tool/result`` event.
+
+    DSH has used two shapes for this. Older logs nested the id in a
+    ``tool-result`` content block (``content[].toolCallId``); the current
+    (v3/v4) logs put it on the message instead — ``message.toolCallId`` and
+    ``message.source.callId`` — with plain ``text`` content blocks. Both must be
+    recognized, or an answered ``ask_user_question`` never closes and its
+    session sticks on yellow once the turn is quiet.
+    """
+    ids: list[str] = []
     if not isinstance(data, dict):
         return ids
+
+    def add(value) -> None:
+        if isinstance(value, str) and value and value not in ids:
+            ids.append(value)
+
     msg = data.get("message")
-    content = msg.get("content") if isinstance(msg, dict) else None
-    for block in content if isinstance(content, list) else []:
-        if isinstance(block, dict) and block.get("type") == "tool-result" and block.get("toolCallId"):
-            ids.append(block["toolCallId"])
+    if isinstance(msg, dict):
+        add(msg.get("toolCallId"))
+        source = msg.get("source")
+        if isinstance(source, dict):
+            add(source.get("callId"))
+        content = msg.get("content")
+        for block in content if isinstance(content, list) else []:
+            if isinstance(block, dict) and block.get("type") == "tool-result":
+                add(block.get("toolCallId"))
+    add(data.get("toolCallId"))
     return ids
 
 

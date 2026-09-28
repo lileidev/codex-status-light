@@ -213,6 +213,40 @@ class DshBridgeTests(unittest.TestCase):
         state, _, _, _ = module.status_for(events)
         self.assertEqual(state, "running")
 
+    def test_resolved_question_current_log_shape_not_waiting(self):
+        # Current DSH logs carry the resolved id on the message
+        # (`message.toolCallId` / `message.source.callId`) with plain `text`
+        # content, not a `tool-result` block. Missing this left an answered
+        # question open forever, so the session stuck on yellow.
+        events = [
+            ev("tool/call", 1000, {"name": "ask_user_question", "callId": "q1", "arguments": "{}"}),
+            ev("tool/result", 1200, {
+                "message": {
+                    "role": "tool",
+                    "source": {"kind": "tool", "callId": "q1"},
+                    "toolCallId": "q1",
+                    "content": [{"type": "text", "text": '{"answers":[]}'}],
+                    "isError": False,
+                }
+            }),
+        ]
+        state, _, _, _ = module.status_for(events)
+        self.assertEqual(state, "running")
+
+    def test_tool_result_call_ids_reads_every_shape(self):
+        self.assertEqual(module._tool_result_call_ids({"toolCallId": "top"}), ["top"])
+        self.assertEqual(module._tool_result_call_ids({"message": {"toolCallId": "m"}}), ["m"])
+        self.assertEqual(
+            module._tool_result_call_ids({"message": {"source": {"callId": "s"}}}), ["s"]
+        )
+        self.assertEqual(
+            module._tool_result_call_ids(
+                {"message": {"content": [{"type": "tool-result", "toolCallId": "b"}]}}
+            ),
+            ["b"],
+        )
+        self.assertEqual(module._tool_result_call_ids({}), [])
+
     def test_last_event_wins(self):
         state, _, streaming, _ = module.status_for([
             ev("assistant/chunk", 1000),
