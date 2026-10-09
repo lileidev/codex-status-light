@@ -55,6 +55,14 @@ _MSG_RUNNING = ("user/message", "turn/start", "step/start", "tool/call", "reques
 _MSG_DONE = ("session/end-seed",)
 _WAITING_TOOLS = ("ask_user_question", "request_user_input", "AskUserQuestion")
 
+# Events that prove a session actually ran (or is asking for) work. A freshly
+# created session whose log holds only its header plus the sandbox/permission
+# seeds has none of these, so it must not look like an open, running turn.
+_TURN_ACTIVITY = (
+    frozenset(_MSG_RUNNING) | frozenset(_MSG_STREAMS) | frozenset(_MSG_REASONING)
+    | {"tool/result", "step/end", "assistant/message", "approval/asked"}
+)
+
 # ``turn/end`` reasons that mean the turn is over (green) vs. that it failed
 # (red). ``completed`` and ``aborted`` are normal terminations.
 _TURN_END_OK = ("completed", "aborted")
@@ -315,21 +323,28 @@ def _pending_approval_ids(events: list[dict]) -> set[str]:
 def has_open_turn(events: list[dict]) -> bool:
     """True when the session is mid-flight (a still-running deep dive).
 
-    A session is "open" while the most recent activity is newer than its last
-    explicit close marker (`turn/end` / `session/end-seed`). `user/message` and
-    `turn/start`/`turn/end` are NOT 1:1 in DSH logs, so we compare timestamps
-    rather than balancing counts. Open (mid-dive) sessions are held much longer
-    than closed ones so a long silent dive doesn't vanish from the light.
+    A session is "open" while its most recent *turn activity* is newer than its
+    last explicit close marker (`turn/end` / `session/end-seed`). `user/message`
+    and `turn/start`/`turn/end` are NOT 1:1 in DSH logs, so we compare
+    timestamps rather than balancing counts. Open (mid-dive) sessions are held
+    much longer than closed ones so a long silent dive doesn't vanish from the
+    light.
+
+    Session metadata alone (header, permission/sandbox seeds, `approval/policy`)
+    is NOT activity: a session that was created but never ran a turn has no
+    close marker either, and treating that as "open" pinned phantom rows on the
+    light for the full deep-hold window.
     """
-    last_any = 0.0
+    last_activity = 0.0
     last_close = 0.0
     for e in events:
         ts = event_epoch(e)
-        if ts > last_any:
-            last_any = ts
-        if e.get("type") in ("turn/end", "session/end-seed") and ts > last_close:
+        kind = e.get("type")
+        if kind in _TURN_ACTIVITY and ts > last_activity:
+            last_activity = ts
+        if kind in ("turn/end", "session/end-seed") and ts > last_close:
             last_close = ts
-    return last_any > last_close
+    return last_activity > 0 and last_activity > last_close
 
 
 def status_for(events: list[dict]) -> tuple[str, str, bool, float]:
@@ -341,6 +356,16 @@ def status_for(events: list[dict]) -> tuple[str, str, bool, float]:
     itself ended in error. If any later running step occurs after an error, the
     light returns to (blue) running.
     """
+    # A session whose log only holds its header and the sandbox/permission seeds
+    # never ran a turn; report it idle instead of defaulting to blue "running".
+    if not any(e.get("type") in _TURN_ACTIVITY for e in events):
+        last_seed_ts = 0.0
+        for e in events:
+            ts = event_epoch(e)
+            if ts > last_seed_ts:
+                last_seed_ts = ts
+        return "done", _message_for("done"), False, last_seed_ts
+
     open_questions = _open_question_call_ids(events)
 
     state = "running"

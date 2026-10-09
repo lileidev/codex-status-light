@@ -80,12 +80,15 @@ class DshBridgeTests(unittest.TestCase):
             [{"type": "session", "data": {"parentSession": "abc"}}]), "abc")
         self.assertIsNone(module._parent_session_id([{"type": "session"}]))
 
-    def test_session_establishes_running(self):
+    def test_session_header_alone_is_idle(self):
+        # The `session` header is written the moment a session is created; it is
+        # not turn activity. A session that never ran a turn must read idle, not
+        # running, or every freshly created (unused) session shows a blue row.
         state, message, streaming, last = module.status_for([
             ev("session", 1000, {"id": "s1", "cwd": "/foo"}),
         ])
-        self.assertEqual(state, "running")
-        self.assertEqual(message, "DSH is working")
+        self.assertEqual(state, "done")
+        self.assertEqual(message, "DSH turn completed")
         self.assertFalse(streaming)
 
     def test_prompt_and_turn_run(self):
@@ -471,6 +474,41 @@ class DshBridgeTests(unittest.TestCase):
                 else:
                     self.assertNotIn(("clear", "session-uuid"), calls,
                                      f"open-turn {name} should be held")
+
+    def test_seed_only_session_is_not_an_open_turn(self):
+        # A session that was created but never used holds only its header and
+        # the sandbox/permission seeds. It also has no turn/end, which used to
+        # look like an open deep dive and pinned a phantom blue row on the
+        # light for the whole deep-hold window.
+        seed = [
+            ev("session", 1000, {"id": "s"}),
+            ev("permission/preset", 1000, {"preset": "workspace-write"}),
+            ev("sandbox/mode", 1000, {"mode": "workspace-write"}),
+            ev("approval/policy", 1000, {"policy": "ask"}),
+        ]
+        self.assertFalse(module.has_open_turn(seed))
+        state, message, streaming, ts = module.status_for(seed)
+        self.assertEqual(state, "done")
+        self.assertEqual(message, "DSH turn completed")
+        self.assertFalse(streaming)
+        self.assertEqual(ts, 1.0)
+
+    def test_activity_after_seed_makes_an_open_turn(self):
+        events = [
+            ev("session", 1000, {"id": "s"}),
+            ev("approval/policy", 1000, {"policy": "ask"}),
+            ev("user/message", 2000),
+        ]
+        self.assertTrue(module.has_open_turn(events))
+        self.assertEqual(module.status_for(events)[0], "running")
+
+    def test_closed_turn_is_not_an_open_turn(self):
+        events = [
+            ev("user/message", 1000),
+            ev("tool/call", 1100, {"name": "bash", "callId": "c1"}),
+            ev("turn/end", 1200, {"reason": {"kind": "completed"}}),
+        ]
+        self.assertFalse(module.has_open_turn(events))
 
 
 if __name__ == "__main__":
