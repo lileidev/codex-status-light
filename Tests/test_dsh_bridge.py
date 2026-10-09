@@ -111,6 +111,48 @@ class DshBridgeTests(unittest.TestCase):
         self.assertEqual(state, "running")
         self.assertTrue(streaming)
 
+    def test_v4_open_step_streams_without_chunk_events(self):
+        # v3/v4 durable logs persist no chunk events, so an open step is the
+        # streaming signal: the light must keep its dot-chase while the model is
+        # producing, even though the log has been silent for a while.
+        state, _, streaming, _ = module.status_for([
+            ev("user/message", 1000),
+            ev("turn/start", 1000),
+            ev("step/start", 1100, {"turn": 1, "step": 1}),
+        ])
+        self.assertEqual(state, "running")
+        self.assertTrue(streaming)
+
+    def test_v4_assistant_message_stops_streaming(self):
+        state, _, streaming, _ = module.status_for([
+            ev("step/start", 1100, {"turn": 1, "step": 1}),
+            ev("assistant/message", 1200, {"turn": 1, "step": 1}),
+        ])
+        self.assertEqual(state, "running")
+        self.assertFalse(streaming)
+
+    def test_v4_tool_call_stops_streaming(self):
+        # A running tool is work, but not model output, so the light stays solid.
+        state, _, streaming, _ = module.status_for([
+            ev("step/start", 1100, {"turn": 1, "step": 1}),
+            ev("assistant/message", 1150, {"turn": 1, "step": 1}),
+            ev("tool/call", 1200, {"turn": 1, "step": 1, "name": "bash", "callId": "c1"}),
+        ])
+        self.assertEqual(state, "running")
+        self.assertFalse(streaming)
+
+    def test_v4_next_step_restarts_streaming(self):
+        state, _, streaming, _ = module.status_for([
+            ev("step/start", 1100, {"turn": 1, "step": 1}),
+            ev("assistant/message", 1150, {"turn": 1, "step": 1}),
+            ev("tool/call", 1200, {"turn": 1, "step": 1, "callId": "c1"}),
+            ev("tool/result", 1300, {"turn": 1, "step": 1}),
+            ev("step/end", 1310, {"turn": 1, "step": 1}),
+            ev("step/start", 1320, {"turn": 1, "step": 2}),
+        ])
+        self.assertEqual(state, "running")
+        self.assertTrue(streaming)
+
     def test_streaming_off_when_chunk_is_stale(self):
         # The most recent generative chunk is older than the window threshold,
         # so the light is done blinking even though it is still running.
@@ -509,6 +551,47 @@ class DshBridgeTests(unittest.TestCase):
             ev("turn/end", 1200, {"reason": {"kind": "completed"}}),
         ]
         self.assertFalse(module.has_open_turn(events))
+
+    def test_streaming_flag_change_is_emitted_even_with_same_message(self):
+        # The row text stays "DSH is working" while streaming flips on at
+        # step/start and off at that step's assistant/message. A message-only
+        # dedupe swallowed those transitions, so the app never saw is_streaming
+        # change and the light stayed solid instead of blinking.
+        import tempfile as _tf
+        now_ms = int(time.time() * 1000)
+        with _tf.TemporaryDirectory() as root:
+            base = pathlib.Path(root)
+            log = base / "s.log"
+            log.write_bytes(b"a")
+            events = [
+                ev("user/message", now_ms - 1000),
+                ev("step/start", now_ms - 900, {"turn": 1, "step": 1}),
+            ]
+            calls = []
+            original = (module.decode_log, module.emit, module.clear,
+                        dict(module._last_effective_message))
+            try:
+                module.decode_log = lambda p: events
+                module.emit = lambda *a, **k: calls.append(a)
+                module.clear = lambda sid: None
+                module._last_effective_message.clear()
+                seen: dict = {}
+                cache: dict = {}
+                module.process_log(log, "session-x", seen, cache)
+
+                events.append(ev("assistant/message", now_ms - 500, {"turn": 1, "step": 1}))
+                log.write_bytes(b"ab")  # new mtime/size => re-evaluated
+                module.process_log(log, "session-x", seen, cache)
+            finally:
+                module.decode_log, module.emit, module.clear = original[0], original[1], original[2]
+                module._last_effective_message.clear()
+                module._last_effective_message.update(original[3])
+
+        self.assertEqual(len(calls), 2, f"expected both transitions, got {calls}")
+        self.assertEqual(calls[0][2], "DSH is working")
+        self.assertTrue(calls[0][3], "open step should be streaming")
+        self.assertEqual(calls[1][2], "DSH is working")
+        self.assertFalse(calls[1][3], "assistant/message should stop streaming")
 
 
 if __name__ == "__main__":

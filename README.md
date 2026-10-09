@@ -116,10 +116,12 @@ approval (`approval/asked` with no matching `approval/decided`) turns it yellow;
 `turn/end` reported with an error/blocked reason turns it red; a `turn/end` with
 a completed reason, or a turn that goes quiet, turns green.
 
-Note: DSH's v3 durable log no longer persists the per-chunk stream events
-(`assistant/chunk`, `reasoning-chunks`) that older logs carried, so a v3 DSH row
-shows solid blue while a step runs rather than the blinking dot-chase reserved
-for agents whose hooks still stream chunks. State colors remain accurate.
+Note: DSH's v3/v4 durable log no longer persists the per-chunk stream events
+(`assistant/chunk`, `reasoning-chunks`) that older logs carried, so streaming is
+inferred from the step lifecycle instead: an open `step/start` (until that step's
+`assistant/message` or first `tool/call`) keeps the row blinking, and a running
+tool shows solid blue. Rows that never ran a turn read idle rather than running.
+State colors remain accurate.
 
 Only **recently active** DSH sessions are shown: a DSH session whose log has not
 been written for `DSH_ACTIVE_WINDOW_SECONDS` seconds (default 180, i.e. 3

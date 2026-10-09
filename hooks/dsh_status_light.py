@@ -63,6 +63,15 @@ _TURN_ACTIVITY = (
     | {"tool/result", "step/end", "assistant/message", "approval/asked"}
 )
 
+# Generation lifecycle in the v3/v4 durable logs: `step/start` opens a model
+# request and that step's `assistant/message` (or its first `tool/call`) closes
+# it. Those logs carry no per-chunk stream events, so this is the only signal
+# for "the model is producing output right now" — what drives the blinking
+# (dot-chase) light instead of a solid blue one.
+_STREAM_OPEN = ("step/start", "assistant/attempt", "llm/retry-started")
+_STREAM_CLOSE = ("assistant/message", "tool/call", "tool/result", "step/end",
+                 "turn/end", "session/end-seed")
+
 # ``turn/end`` reasons that mean the turn is over (green) vs. that it failed
 # (red). ``completed`` and ``aborted`` are normal terminations.
 _TURN_END_OK = ("completed", "aborted")
@@ -370,6 +379,7 @@ def status_for(events: list[dict]) -> tuple[str, str, bool, float]:
 
     state = "running"
     streaming = False
+    generating = False
     last_ts = 0.0
     last_stream_ts = 0.0
     last_visible_ts = 0.0
@@ -383,6 +393,11 @@ def status_for(events: list[dict]) -> tuple[str, str, bool, float]:
         if ts:
             last_ts = ts
         data = e.get("data", e)
+
+        if kind in _STREAM_OPEN:
+            generating = True
+        elif kind in _STREAM_CLOSE:
+            generating = False
 
         if kind == "turn/end":
             # A real end marker is more reliable than the idle heuristic: once
@@ -432,6 +447,12 @@ def status_for(events: list[dict]) -> tuple[str, str, bool, float]:
     # producing keeps the light blinking regardless of the tail event type.
     if last_stream_ts:
         streaming = state == "running" and (last_ts - last_stream_ts) <= STREAMING_WINDOW_SECONDS
+
+    # v3/v4 logs have no chunk events, so fall back to the step lifecycle: an
+    # open step means the model is still producing (a long deep dive included)
+    # even though the log has been silent for a while.
+    if state == "running" and generating:
+        streaming = True
 
     # "Deep dive": the most recent generative activity was reasoning/thinking
     # with no visible assistant output after it, so the model is still working
@@ -552,7 +573,8 @@ def _parent_session_id(events: list[dict]) -> str | None:
 # parent-session-id -> number of currently-running subagents, rebuilt each full
 # scan so a parent row can surface "· N 子代理运行中" without adding rows.
 _subagent_active_counts: dict[str, int] = {}
-_last_effective_message: dict[str, str] = {}
+# Last emitted row signature per session: (state, effective message, streaming).
+_last_effective_message: dict[str, tuple[str, str, bool]] = {}
 
 
 def _effective_session_message(session_id: str, base: str) -> str:
@@ -691,8 +713,13 @@ def process_log(log_path: pathlib.Path, session_id: str, seen: dict, cache: dict
     else:
         cur = (cached[1], cached[2], cached[3], cached[4])
     eff_message = _effective_session_message(session_id, cur[1])
-    if _last_effective_message.get(session_id) != eff_message:
-        _last_effective_message[session_id] = eff_message
+    # Dedupe on the whole row, not just the message: state and the streaming
+    # flag change the light on their own (e.g. "DSH is working" stays the same
+    # text while streaming flips on at step/start and off at its tool/call), and
+    # a message-only key would swallow those updates.
+    signature = (cur[0], eff_message, bool(cur[2]))
+    if _last_effective_message.get(session_id) != signature:
+        _last_effective_message[session_id] = signature
         emit(cur[0], session_id, eff_message, cur[2], cwd=cur[3])
     seen[log_path] = marker
 
