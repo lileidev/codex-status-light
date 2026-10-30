@@ -773,6 +773,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let store = StatusStore()
     private var statusWindow: NSPanel?
     private var cancellables = Set<AnyCancellable>()
+    /// Last observed state per session id, used to tell genuinely new work
+    /// (a new session, a new turn, or a wait/error) apart from routine
+    /// refreshes when deciding whether to re-open a closed panel.
+    private var knownSessionStates: [String: LightState] = [:]
 
     /// A borderless floating panel whose controls actually accept clicks.
     ///
@@ -801,10 +805,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             self?.showWindow()
         }
 
-        // Resize the floating window whenever the underlying sessions change.
+        // Seed the reopen rule with what is already on disk: the launch path
+        // below owns the first reveal, so only *later* changes can re-open a
+        // panel the user has closed.
+        knownSessionStates = Dictionary(
+            store.sessions.map { ($0.sessionID, $0.state) },
+            uniquingKeysWith: { _, latest in latest }
+        )
+
+        // Resize the floating window whenever the underlying sessions change,
+        // and bring it back when a new task needs to be visible again.
         store.$sessions
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in self?.resizeWindow() }
+            .sink { [weak self] sessions in
+                self?.resizeWindow()
+                self?.revealPanelIfNeeded(for: sessions)
+            }
             .store(in: &cancellables)
 
         // Display sleep/wake and monitor reconfiguration make macOS relocate
@@ -871,7 +887,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             statusWindow = window
         }
 
+        // An app hidden with ⌘H keeps its windows off-screen even after
+        // `orderFrontRegardless`, so unhide (without stealing focus) first.
+        NSApp.unhideWithoutActivation()
         statusWindow?.orderFrontRegardless()
+    }
+
+    /// Re-show the floating panel when work the user should see starts while it
+    /// is closed. Closing the panel deliberately keeps the app (and its
+    /// menu-bar item) alive, so the agent hooks and the DSH watcher keep seeing
+    /// a live process and never launch it again; without this the app could sit
+    /// windowless forever and look like nothing had been started.
+    ///
+    /// Only a *new* session, a new turn (done/error → running), or a transition
+    /// into waiting/error re-opens the panel. Routine refreshes — including a
+    /// running session flipping its streaming flag — leave a hidden panel
+    /// hidden, so closing it stays possible during a long turn.
+    private func revealPanelIfNeeded(for sessions: [SessionState]) {
+        let previous = knownSessionStates
+        knownSessionStates = Dictionary(
+            sessions.map { ($0.sessionID, $0.state) },
+            uniquingKeysWith: { _, latest in latest }
+        )
+        guard statusWindow?.isVisible != true,
+              Self.shouldRevealPanel(previous: previous, current: sessions) else { return }
+        showWindow()
+    }
+
+    /// Pure decision helper for ``revealPanelIfNeeded`` so the reopen policy is
+    /// unit-testable without AppKit windows.
+    nonisolated static func shouldRevealPanel(
+        previous: [String: LightState],
+        current: [SessionState]
+    ) -> Bool {
+        for session in current {
+            let prior = previous[session.sessionID]
+            switch session.state {
+            case .running:
+                // A brand-new session, or the first turn after a terminal
+                // state, is new work worth surfacing.
+                if prior == nil || prior == .done || prior == .error { return true }
+            case .waiting, .error:
+                // Attention states interrupt a hidden panel, but only on the
+                // transition into them, not on every refresh.
+                if prior != session.state { return true }
+            case .done:
+                break
+            }
+        }
+        return false
     }
 
     /// The user's chosen top-left of the floating panel, persisted across app
@@ -983,11 +1047,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         rememberPanelTopLeft(from: window)
     }
 
-    /// A menu-bar utility must stay alive when its floating panel is closed;
-    /// otherwise the next agent event relaunches the app and the panel lands at
-    /// the default top-right position again.
+    /// A menu-bar utility must stay alive when its floating panel is closed so
+    /// the menu-bar item keeps working; ``revealPanelIfNeeded`` brings the panel
+    /// back on the next new session/turn. (The panel position survives either
+    /// way, since it is persisted in UserDefaults.)
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         false
+    }
+
+    /// Re-open the panel when the already-running app is asked to reopen (Finder,
+    /// `open -g AgentsLight.app`, Apple Events). Without this, reopening a
+    /// windowless-but-running instance is a no-op and the panel could only be
+    /// recovered by quitting the app.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        showWindow()
+        return true
     }
 
     private func resizeWindow() {

@@ -593,6 +593,19 @@ class DshBridgeTests(unittest.TestCase):
         self.assertEqual(calls[1][2], "DSH is working")
         self.assertFalse(calls[1][3], "assistant/message should stop streaming")
 
+    def test_has_active_sessions_includes_waiting_and_error(self):
+        # A waiting/error session must still launch the app; only done rows (and
+        # an empty cache) may leave it unlaunched.
+        self.assertFalse(module.has_active_sessions({}))
+        self.assertFalse(module.has_active_sessions({
+            "/log": (0.0, "done", "DSH turn completed", False, "/tmp", False),
+        }))
+        for state in ("running", "waiting", "error"):
+            with self.subTest(state=state):
+                self.assertTrue(module.has_active_sessions({
+                    "/log": (0.0, state, "message", False, "/tmp", False),
+                }))
+
 
 if __name__ == "__main__":
     unittest.main()

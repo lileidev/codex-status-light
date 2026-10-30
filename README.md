@@ -30,6 +30,11 @@ Open the menu-bar item and choose **Show floating light** to keep the panel abov
 other windows after closing it. The floating light opens automatically when the
 app launches.
 
+Closing the panel with its × button hides it but keeps AgentsLight running in the
+menu bar (so the menu item always works). The panel re-opens by itself when a new
+agent session or turn starts, or when an agent starts waiting for approval or
+reports an error — routine status refreshes never re-open a panel you closed.
+
 ## Install agent integrations
 
 The shared CLI, state directory, and hooks live under `~/.agents-status-light/`.

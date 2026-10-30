@@ -729,6 +729,18 @@ _app_running_cache: tuple[bool, float] | None = None
 # is re-checked promptly instead of being held by a long 30s cooldown.
 _APP_LAUNCH_RETRY_SECONDS = 3.0
 
+# States that mean "the status light should be on screen". Waiting/error
+# sessions matter as much as running ones: if the app was quit while an agent
+# is blocked on approval, an open error, or a question, the light still has to
+# come up. A closed *panel* is re-opened by the app itself (see
+# ``AppDelegate.revealPanelIfNeeded``) when it sees the next new session/turn.
+_ACTIVE_STATES = ("running", "waiting", "error")
+
+
+def has_active_sessions(cache: dict) -> bool:
+    """True when any tracked DSH session needs the menu-bar app running."""
+    return any(value[1] in _ACTIVE_STATES for value in cache.values())
+
 
 def _app_path() -> pathlib.Path:
     return pathlib.Path(
@@ -806,13 +818,13 @@ def main() -> int:
             current.add(str(log))    # str key (used by `cache`)
             current.add(session_id)  # session-id key (used by _last_effective_message)
             process_log(log, session_id, seen, cache)
-        # Launch the menu-bar app if DSH has any live session showing. This only
-        # happens on a real watch loop (interval), not --once scans.
-        if args.interval:
-            for key in cache.values():
-                if key[1] == "running":  # state != cleared/done
-                    ensure_app_running()
-                    break
+        # Launch the menu-bar app if DSH has any session that needs the light
+        # (running, waiting for approval, or errored). This only happens on a
+        # real watch loop (interval), not --once scans. Re-showing a panel the
+        # user closed is handled app-side on the next new session/turn, so this
+        # check stays cheap and never fights the user's close.
+        if args.interval and has_active_sessions(cache):
+            ensure_app_running()
         # Prune leaked state: drop `seen`/`cache` entries whose session log no
         # longer exists on disk. Otherwise a long-lived daemon grows both dicts
         # unboundedly over time as historical DSH sessions are deleted.
