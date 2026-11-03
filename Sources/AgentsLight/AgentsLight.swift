@@ -575,6 +575,11 @@ struct StatusLightView: View {
             RoundedRectangle(cornerRadius: 12)
                 .stroke(.white.opacity(0.18), lineWidth: 1)
         }
+        // The light is the only status cue in a row, so expose the state as text
+        // for VoiceOver and the pointer tooltip rather than relying on colour alone.
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(activeState?.label ?? "No active session")
+        .help(activeState?.label ?? "No active session")
     }
 }
 
@@ -652,6 +657,12 @@ struct MenuStatusIcon: View {
 
 struct SessionRowView: View {
     let session: SessionState
+    /// Horizontal space kept clear on the title line. The floating panel overlays
+    /// its close button on the first row's title band (the button's glyph sits
+    /// above the message), so that title truncates instead of running the text
+    /// underneath the glyph. The message keeps the full width, since it starts
+    /// below the button.
+    var trailingInset: CGFloat = 0
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
@@ -662,6 +673,7 @@ struct SessionRowView: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
+                    .padding(.trailing, trailingInset)
                 Text(session.message)
                     .font(.caption)
                     .lineLimit(2)
@@ -703,6 +715,10 @@ struct StatusContentView: View {
     @ObservedObject var store: StatusStore
     @State private var window: NSWindow?
 
+    /// Footprint the overlaid close button reserves on the first row: a 10 pt
+    /// glyph plus 8 pt padding either side, plus the panel's own 8 pt inset.
+    static let closeButtonInset: CGFloat = 34
+
     var body: some View {
         ZStack(alignment: .topTrailing) {
             VStack(alignment: .leading, spacing: 8) {
@@ -712,6 +728,7 @@ struct StatusContentView: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("Idle")
                                 .font(.caption)
+                                .padding(.trailing, Self.closeButtonInset)
                             Text("Waiting for an agent task")
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
@@ -719,15 +736,20 @@ struct StatusContentView: View {
                     }
                 } else {
                     LazyVStack(alignment: .leading, spacing: 10) {
-                        ForEach(store.displaySessions) { session in
-                            SessionRowView(session: session)
+                        ForEach(Array(store.displaySessions.enumerated()), id: \.element.id) { index, session in
+                            // Only the first row sits under the overlaid close
+                            // button; later rows can use the full width.
+                            SessionRowView(
+                                session: session,
+                                trailingInset: index == 0 ? Self.closeButtonInset : 0
+                            )
                         }
                     }
                     .padding(.vertical, 2)
                 }
             }
             .padding(12)
-            .frame(width: 260)
+            .frame(width: AppDelegate.panelWidth)
             .background(
                 RoundedRectangle(cornerRadius: 16)
                     .fill(.ultraThinMaterial)
@@ -790,13 +812,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         override var canBecomeMain: Bool { false }
     }
 
-    /// Height needed to show all sessions without scrolling.
-    /// - One session / idle row needs about 120 pt.
-    /// - Each additional session adds roughly one row height.
-    private func windowHeight(for sessionCount: Int) -> CGFloat {
-        let rowHeight: CGFloat = 56
-        let baseHeight: CGFloat = 64
-        return max(120, baseHeight + CGFloat(sessionCount) * rowHeight)
+    /// Height needed to show all sessions without scrolling, derived from the
+    /// content view's own measurement.
+    ///
+    /// The panel used to reserve a fixed 56 pt per row plus a 64 pt base, which
+    /// left 51–96 pt of empty panel below the last row (two lines of text fit in
+    /// less than a 56 pt row). Measuring the hosting view keeps the panel tight
+    /// around whatever the rows actually need. `NSHostingView` also drives the
+    /// window to this same fitting height, so the measurement is the single source
+    /// of truth for both.
+    nonisolated static func panelHeight(forContentHeight contentHeight: CGFloat) -> CGFloat {
+        contentHeight.rounded(.up)
+    }
+
+    /// The height the hosted SwiftUI content wants, independent of the frame the
+    /// window currently gives it.
+    private func measuredContentHeight(_ view: NSView) -> CGFloat {
+        view.layoutSubtreeIfNeeded()
+        return view.fittingSize.height
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -841,18 +874,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         )
     }
 
+    /// Fixed panel width; the height follows the measured content.
+    nonisolated static let panelWidth: CGFloat = 260
+
     func showWindow() {
         if statusWindow == nil {
-            let height = windowHeight(for: store.displaySessions.count)
+            // Size the panel to the content it will host rather than guessing a
+            // per-row height. Measuring needs the real width, since the message
+            // wraps at this width and a wrapped message is taller.
+            let hosting = NSHostingView(rootView: StatusContentView(store: store))
+            hosting.frame = NSRect(x: 0, y: 0, width: Self.panelWidth, height: 1)
+            let height = Self.panelHeight(forContentHeight: measuredContentHeight(hosting))
             let window = FloatingStatusPanel(
-                contentRect: NSRect(x: 0, y: 0, width: 260, height: height),
+                contentRect: NSRect(x: 0, y: 0, width: Self.panelWidth, height: height),
                 styleMask: [.borderless, .nonactivatingPanel],
                 backing: .buffered,
                 defer: false
             )
             // No system title bar; the SwiftUI view provides its own close button.
             window.title = "AgentsLight"
-            window.contentView = NSHostingView(rootView: StatusContentView(store: store))
+            window.contentView = hosting
             window.level = .floating
             window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
             window.isOpaque = false
@@ -1065,10 +1106,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private func resizeWindow() {
-        guard let window = statusWindow else { return }
+        guard let window = statusWindow, let content = window.contentView else { return }
 
-        let newHeight = windowHeight(for: store.displaySessions.count)
+        // Re-measure after the session list changed: a new row, or a message that
+        // now wraps to a second line, needs more panel than the previous state.
+        content.layoutSubtreeIfNeeded()
+        let newHeight = Self.panelHeight(forContentHeight: measuredContentHeight(content))
         let frame = window.frame
+        guard abs(frame.height - newHeight) > 0.5 else { return }
         let newOrigin = NSPoint(
             x: frame.maxX - frame.width,
             y: frame.maxY - newHeight
