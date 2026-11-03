@@ -15,6 +15,7 @@ appearance, same sessions in both revisions).
 | `06-after-idle.png` | this branch |
 | `07-light-chip-comparison.png` | Status-light chip removed, all cases |
 | `08-light-chip-zoom.png` | Status-light chip removed, first row at 3x |
+| `09-agent-icon-alignment.png` | Agent glyph centred on the light, first row at 3x |
 
 Captured at 2x backing scale, downscaled to 1x here.
 

@@ -554,6 +554,14 @@ struct StatusLightView: View {
     let activeState: LightState?
     let isStreaming: Bool
 
+    /// Size of the light itself, and of the padding around it.
+    static let lightSize: CGFloat = 24
+    static let lightPadding: CGFloat = 6
+    /// Total vertical footprint a light occupies in a row. Rows align their
+    /// contents to this height, so a shorter neighbour (the agent glyph) can centre
+    /// on the light instead of hanging above it.
+    static let footprint: CGFloat = lightSize + lightPadding * 2
+
     var body: some View {
         let color = activeState?.color ?? .blue
         let isChasing = activeState == .running && isStreaming
@@ -571,8 +579,8 @@ struct StatusLightView: View {
         // No chip behind the light: a black rounded box made every row read like a
         // button and competed with the colour that carries the status. The frame and
         // padding stay so the light keeps its size and the row keeps its geometry.
-        .frame(width: 24, height: 24)
-        .padding(6)
+        .frame(width: Self.lightSize, height: Self.lightSize)
+        .padding(Self.lightPadding)
         // The light is the only status cue in a row, so expose the state as text
         // for VoiceOver and the pointer tooltip rather than relying on colour alone.
         .accessibilityElement(children: .ignore)
@@ -705,6 +713,11 @@ struct AgentIndicator: View {
                     .frame(width: 14, height: 14)
             }
         }
+        // Centre the glyph on the status light beside it. Rows are top-aligned, so a
+        // bare 14 pt glyph sat ~11 pt above the light's centre; matching the light's
+        // footprint lines the two up without adding height, since the light is
+        // already the tallest item in the row.
+        .frame(height: StatusLightView.footprint)
         .help(agent?.rawValue ?? "Unknown agent")
     }
 }
