@@ -568,13 +568,11 @@ struct StatusLightView: View {
                     .shadow(color: color.opacity(0.9), radius: 6)
             }
         }
+        // No chip behind the light: a black rounded box made every row read like a
+        // button and competed with the colour that carries the status. The frame and
+        // padding stay so the light keeps its size and the row keeps its geometry.
         .frame(width: 24, height: 24)
         .padding(6)
-        .background(.black.opacity(0.45), in: RoundedRectangle(cornerRadius: 12))
-        .overlay {
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(.white.opacity(0.18), lineWidth: 1)
-        }
         // The light is the only status cue in a row, so expose the state as text
         // for VoiceOver and the pointer tooltip rather than relying on colour alone.
         .accessibilityElement(children: .ignore)

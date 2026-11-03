@@ -13,6 +13,8 @@ appearance, same sessions in both revisions).
 | `04-after-long-title.png` | this branch |
 | `05-before-idle.png` | `main` @ `20e5e93` |
 | `06-after-idle.png` | this branch |
+| `07-light-chip-comparison.png` | Status-light chip removed, all cases |
+| `08-light-chip-zoom.png` | Status-light chip removed, first row at 3x |
 
 Captured at 2x backing scale, downscaled to 1x here.
 
