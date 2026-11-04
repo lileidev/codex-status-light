@@ -25,11 +25,12 @@ The latency comes from Codex's hook contract:
 
 So after the user presses "approve", the light remains yellow for the whole runtime of
 the approved command (and, if the model keeps calling tools, until the next hook of any
-kind). After a denial or tool failure it can stay yellow until the next tool call,
-`Stop`, or `SessionEnd`.
+kind). After a denial or tool failure it can stay yellow until the next hooked event —
+typically the next `PostToolUse`, `Stop`, or `SessionEnd`.
 
-There is no hook-only fix that clears the light at the instant of approval. The practical
-options are:
+There is no hook-only fix that observes the native prompt and clears the light at the
+instant of approval (a hook could take over the decision with its own approval UI, but
+that changes Codex's flow; see below). The practical options are:
 
 1. **Small, safe, partial fix:** add `PreModelRequest` (and `Interrupt`) hooks to clear
    stale yellow as soon as the turn resumes after a denial/failure; long commands still
@@ -52,8 +53,8 @@ The rest of this document is the evidence and the trade-offs.
 From `~/.codex/status-light/hook.log`:
 
 - `PermissionRequest` → `emit: state=waiting` is typically **20–30 ms**
-  (observed range roughly 19–60 ms; the occasional 100–250 ms entry is the hook log
-  rotation / first-run cost).
+  (observed range roughly 19–60 ms; the occasional 100–250 ms entry is an outlier,
+  not the steady state).
 - The shared CLI writes the JSON atomically (`bin/agents-light`,
   `write_state()` uses `tempfile` + `os.replace`).
 - `StatusStore` watches the state directory with FSEvents, latency `0.5`, and coalesces
@@ -73,8 +74,9 @@ A representative trace from `hook.log` (session `01a1a47f-…`, UTC):
 2026-11-04T07:04:24.254Z emit: state=running session=01a1a47f-…
 ```
 
-The light was yellow for **61.3 s**. The hook log contains no event at the moment the
-user answered the prompt; the next state change only happened when a tool completed.
+The light was yellow for **61.3 s**. The log cannot show the exact moment the user
+answered, but it contains no state change between the request and the tool completion;
+the source below explains why Codex cannot report that moment.
 Across the captured log there are 153 yellow periods, with a median of 12.7 s in the
 most recent session and a maximum of 47 minutes in the older session; some of that is
 genuine time-away-from-keyboard, but the mechanism above is why the light cannot clear
@@ -159,7 +161,7 @@ moment the user answers.
 | User approves, then model thinks for 20 s before the next tool | `PreModelRequest` (currently unhooked) | Yellow until the next hooked event; often the next `PostToolUse` |
 | User denies an approval | none (`PostToolUse` is success-only) | Yellow until the next tool call, `Stop`, or turn end |
 | Tool fails/errors | none (`PostToolUse` is success-only) | Yellow can persist until the next event |
-| User cancels/aborts the turn | `Interrupt` or `Stop` (currently unhooked/partly hooked) | Yellow until `Stop` (or forever if the turn ends without a hooked event) |
+| User cancels/aborts the turn | `Interrupt` or `Stop` (currently unhooked/partly hooked) | Yellow until `Interrupt`/`Stop`, or the app's 30-minute stale-row timeout |
 
 The hook's `_awaiting_input` guard is in-process only and is discarded with the process;
 it cannot bridge events. That is not the cause of the delay, but it is why the only
@@ -179,6 +181,11 @@ reliable guard is the state file.
 - **Tailing the rollout / session JSONL** — approval decisions are transient and are not
   persisted (see above).
 - **TUI desktop notifications** — `approval-requested` only; no external resolved event.
+
+One theoretical exception: a `PermissionRequest` hook can return `allow`/`deny`, so it
+could replace the native prompt with its own approval UI, know the answer, and clear the
+light instantly. That takes over Codex's approval flow (and its trust/security model), so
+it is a product decision rather than a status-light fix; it is not proposed here.
 
 ## Optimization options
 
@@ -242,8 +249,7 @@ Why it is not the immediate recommendation:
 
 - The app-server control socket/protocol is experimental and versioned; a quick probe
   with `codex app-server proxy` against the running managed daemon did not complete an
-  `initialize` while the desktop/VS Code client was connected. Whether a second client
-  can attach reliably needs a focused spike.
+  `initialize`. Whether a second client can attach reliably needs a focused spike.
 - Upstream [#39426](https://github.com/openai/codex/issues/39426) explicitly notes that
   a separate read-only observer cannot attach to every existing App, IDE, and CLI task.
 - It duplicates/replaces the hook's state machine and needs its own lifecycle (reconnect,
