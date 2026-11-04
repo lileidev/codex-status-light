@@ -17,8 +17,18 @@ appearance, same sessions in both revisions).
 | `08-light-chip-zoom.png` | Status-light chip removed, first row at 3x |
 | `09-before-agent-icon-alignment.png` | `1b35bc5`, glyph above the light |
 | `09-after-agent-icon-alignment.png` | this branch, glyph centred on the light |
+| `10-streaming-light-before.png` | `main` @ `6473e96`, streaming light on the light panel |
+| `11-streaming-light-after.png` | this branch, same streaming light |
+| `12-streaming-light-comparison.png` | Before/after side by side, light appearance |
+| `13-streaming-light-comparison-dark.png` | Before/after side by side, dark appearance |
 
 Captured at 2x backing scale, downscaled to 1x here.
+
+10–13 render the real `StatusContentView` in an off-screen window so the glass
+material and appearance match the app; the streaming light is shown at 8x. The
+light panel sits over a white window and the dark panel over a black one, since
+the panel is translucent. Same sessions, viewport and streaming state in both
+revisions.
 
 These are off-screen renders, not screen captures: this machine has no
 on-console GUI session, so `screencapture` cannot grab the live panel. The same

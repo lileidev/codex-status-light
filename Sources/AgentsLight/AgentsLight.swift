@@ -595,6 +595,16 @@ struct StatusLightView: View {
 struct StatusChaseView: View {
     let color: Color
 
+    /// The trailing cells used to fade to 14% alpha, which reads on the dark
+    /// panel but washes out into the light floating panel (light appearance,
+    /// which sits on grey glass around 0.78 luminance). Keep a floor on the fill
+    /// so the trail stays visible, and give every dot a neutral dark rim: the
+    /// rim blends into the dark panel but defines each dot against light glass.
+    static let dotSize: CGFloat = 4.4
+    static let trailFloor: Double = 0.45
+    static let rimOpacity: Double = 0.55
+    static let rimWidth: CGFloat = 0.7
+
     // Cell centroids on a 0..8 grid in sweep order (clockwise around the rim),
     // matching DSH's original 3x3 edge positions.
     static let cells: [CGPoint] = [
@@ -624,10 +634,16 @@ private struct ChaseContent: View {
                 let i = pair.offset
                 let cell = pair.element
                 let d = Self.ringDistance(Int(i), bright: phase)
-                let intensity = d <= 0.05 ? 1.0 : max(0.14, 1.0 - d / 2.6)
+                let intensity = d <= 0.05 ? 1.0 : max(StatusChaseView.trailFloor, 1.0 - d / 2.6)
                 Circle()
                     .fill(color.opacity(intensity))
-                    .frame(width: 4.4, height: 4.4)
+                    .frame(width: StatusChaseView.dotSize, height: StatusChaseView.dotSize)
+                    .overlay {
+                        Circle().stroke(
+                            .black.opacity(StatusChaseView.rimOpacity),
+                            lineWidth: StatusChaseView.rimWidth
+                        )
+                    }
                     // Map the 0..8 grid onto a 16x16 square whose side equals the
                     // steady dot's diameter, so the chase reads at the same size.
                     .position(x: 4 + cell.x * 2, y: 4 + cell.y * 2)
