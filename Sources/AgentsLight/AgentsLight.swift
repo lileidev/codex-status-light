@@ -760,7 +760,11 @@ struct StatusContentView: View {
                 }
             }
             .padding(12)
-            .frame(width: AppDelegate.panelWidth)
+            // Idle content is only as wide as its two lines need, so the border
+            // hugs it instead of keeping a 260 pt frame with ~34 pt of blank
+            // space either side. Live rows stay at the maximum width so their
+            // messages wrap predictably instead of stretching the panel.
+            .modifier(PanelWidthModifier(compact: store.displaySessions.isEmpty))
             .background(
                 RoundedRectangle(cornerRadius: 16)
                     .fill(.ultraThinMaterial)
@@ -782,6 +786,22 @@ struct StatusContentView: View {
             .padding(.trailing, 8)
         }
         .background(FloatingWindowAccessor { window = $0 })
+    }
+}
+
+/// Applies the floating panel's width rule to its bordered content: idle hugs
+/// its intrinsic (measured) width, while session rows keep the maximum width so
+/// their message text wraps at a stable boundary.
+private struct PanelWidthModifier: ViewModifier {
+    let compact: Bool
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if compact {
+            content.fixedSize(horizontal: true, vertical: false)
+        } else {
+            content.frame(width: AppDelegate.panelWidth, alignment: .leading)
+        }
     }
 }
 
@@ -836,11 +856,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         contentHeight.rounded(.up)
     }
 
-    /// The height the hosted SwiftUI content wants, independent of the frame the
-    /// window currently gives it.
-    private func measuredContentHeight(_ view: NSView) -> CGFloat {
+    /// The size the hosted SwiftUI content wants, independent of the frame the
+    /// window currently gives it. Width is measured before height so the idle
+    /// panel can shrink to its content and live rows can wrap at the final width.
+    private func measuredContentSize(_ view: NSView) -> NSSize {
         view.layoutSubtreeIfNeeded()
-        return view.fittingSize.height
+        return view.fittingSize
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -885,19 +906,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         )
     }
 
-    /// Fixed panel width; the height follows the measured content.
+    /// Maximum panel width. Session rows use the whole width so long messages
+    /// have room to wrap; idle content is narrower and shrinks the border to fit.
     nonisolated static let panelWidth: CGFloat = 260
+
+    /// Lower bound for the compact (idle) panel, so a measurement that comes
+    /// back unexpectedly small cannot collapse the border around the light.
+    nonisolated static let minPanelWidth: CGFloat = 160
+
+    /// Width the panel should take for a content view whose ideal width is
+    /// ``contentWidth``: round up to a whole point, clamp short content to the
+    /// minimum, and cap long content at ``panelWidth``.
+    nonisolated static func panelWidth(forContentWidth contentWidth: CGFloat) -> CGFloat {
+        // A zero/NaN measurement means the hosting view has not laid out yet;
+        // keep the maximum width rather than flashing a collapsed panel.
+        guard contentWidth.isFinite, contentWidth > 0 else { return Self.panelWidth }
+        return min(Self.panelWidth, max(Self.minPanelWidth, contentWidth.rounded(.up)))
+    }
 
     func showWindow() {
         if statusWindow == nil {
-            // Size the panel to the content it will host rather than guessing a
-            // per-row height. Measuring needs the real width, since the message
-            // wraps at this width and a wrapped message is taller.
+            // Size the panel to the content it will host rather than assuming
+            // the fixed session width. Measure the ideal width first: idle
+            // content is compact, while session rows are pinned to the maximum
+            // width. Then measure the height at that final width, since a
+            // narrower row may wrap differently.
             let hosting = NSHostingView(rootView: StatusContentView(store: store))
             hosting.frame = NSRect(x: 0, y: 0, width: Self.panelWidth, height: 1)
-            let height = Self.panelHeight(forContentHeight: measuredContentHeight(hosting))
+            let width = Self.panelWidth(forContentWidth: measuredContentSize(hosting).width)
+            hosting.frame = NSRect(x: 0, y: 0, width: width, height: 1)
+            let height = Self.panelHeight(forContentHeight: measuredContentSize(hosting).height)
             let window = FloatingStatusPanel(
-                contentRect: NSRect(x: 0, y: 0, width: Self.panelWidth, height: height),
+                contentRect: NSRect(x: 0, y: 0, width: width, height: height),
                 styleMask: [.borderless, .nonactivatingPanel],
                 backing: .buffered,
                 defer: false
@@ -1119,18 +1159,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func resizeWindow() {
         guard let window = statusWindow, let content = window.contentView else { return }
 
-        // Re-measure after the session list changed: a new row, or a message that
-        // now wraps to a second line, needs more panel than the previous state.
-        content.layoutSubtreeIfNeeded()
-        let newHeight = Self.panelHeight(forContentHeight: measuredContentHeight(content))
+        // Re-measure after the session list changed. Width comes first so the
+        // idle panel can become compact (and expand back for sessions), then
+        // height at that width because a narrower row may wrap differently.
+        let newWidth = Self.panelWidth(forContentWidth: measuredContentSize(content).width)
+        content.frame.size.width = newWidth
+        let newHeight = Self.panelHeight(forContentHeight: measuredContentSize(content).height)
         let frame = window.frame
-        guard abs(frame.height - newHeight) > 0.5 else { return }
+        guard abs(frame.width - newWidth) > 0.5 || abs(frame.height - newHeight) > 0.5 else { return }
+        // Keep the top-right edge fixed: the default placement is the screen's
+        // top-right corner, so growing/shrinking moves the border inward rather
+        // than pushing it off-screen.
         let newOrigin = NSPoint(
-            x: frame.maxX - frame.width,
+            x: frame.maxX - newWidth,
             y: frame.maxY - newHeight
         )
         window.setFrame(
-            NSRect(x: newOrigin.x, y: newOrigin.y, width: frame.width, height: newHeight),
+            NSRect(x: newOrigin.x, y: newOrigin.y, width: newWidth, height: newHeight),
             display: true,
             animate: false
         )
