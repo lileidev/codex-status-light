@@ -22,7 +22,8 @@ import Testing
         #expect(four > one)
     }
 
-    @Test func panelWidthIsFixed() {
+    @Test func panelWidthIsTheMaximumWidth() {
         #expect(AppDelegate.panelWidth == 260)
+        #expect(AppDelegate.minPanelWidth < AppDelegate.panelWidth)
     }
 }
