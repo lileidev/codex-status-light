@@ -274,6 +274,34 @@ away. It changes the meaning of the light, so it should not be the default.
 3. **Only if instant clearing is required locally:** spike Option 3 against the current
    app-server, with a clear fallback to the hooks when the observer cannot connect.
 
+## Update: implemented command-start watcher (2026-11-09)
+
+Instead of waiting for Option 1/2/3, the local hook now bridges the gap itself. On
+`PermissionRequest` it records the waiting state's fingerprint and spawns a detached
+watcher (`codex_status_hook.py --watch-approval <job>`):
+
+- If the event carries a shell command (`tool_input.command` / `cmd`), the watcher polls
+  `ps` for a *new* process whose command line contains a distinctive slice of it. Codex
+  runs approved commands as `/bin/zsh -lc <command>`, so this is the instant execution
+  starts (0.3 s poll; measured clear 0.2–0.3 s after the command appears).
+- Otherwise (`write_stdin`, `apply_patch`, …) it tails the event's `transcript_path` and
+  clears when the tool output line appears, which also covers approvals that never spawn
+  a fresh process.
+- It writes `running` only while the exact waiting state (state + message + `updated_at`)
+  is still on disk, so a newer approval, a denial followed by another event, `Stop`, or
+  `SessionEnd` always wins. It exits when the Codex process disappears or after 15
+  minutes, and job files are pruned.
+
+Tests: 12 new cases in `Tests/test_codex_hook.py` (needle extraction, `ps` matching,
+transcript parsing, spawn, clear/stop paths); the hook-spawn and transcript paths were
+also run end-to-end with a synthetic `PermissionRequest` against an isolated state dir.
+
+Limits: this is a local heuristic, not a supported hook contract. It needs `ps` (already
+used by `_parent_process_name` / `ensure_app_running`), and it cannot clear at the instant
+of a *denial* — there is still no event until the next Codex action, so Option 1 remains a
+useful complement. The app-server `thread/status/changed` route (Option 3) is still the
+only way to observe approvals and denials exactly.
+
 ## Reproduction
 
 The trace can be reproduced from the hook log:

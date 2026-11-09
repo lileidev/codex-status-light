@@ -7,6 +7,7 @@ import datetime as dt
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import threading
@@ -372,6 +373,309 @@ def failed_tool(event: dict) -> bool:
     return any(marker in text for marker in ('"is_error": true', '"exit_code": 1', "fatal:", "traceback"))
 
 
+# --- Approval watcher -------------------------------------------------------
+#
+# Codex fires `PermissionRequest` before the approval prompt and has no hook
+# for the answer itself; `PostToolUse` arrives only after a *successful* tool
+# finishes (and for some calls, such as `write_stdin`, only at the next tool).
+# The light would therefore stay yellow for the whole runtime of an approved
+# command. This watcher closes that gap without taking over the prompt:
+#
+#   * when the approval carries a shell command, wait for a *new* process whose
+#     command line contains a distinctive slice of that command (Codex runs it
+#     as `/bin/zsh -lc <command>`), i.e. the instant execution starts;
+#   * otherwise (`write_stdin`, `apply_patch`, ...) wait for the tool's output
+#     to appear in the session transcript, which is the next observable event.
+#
+# The watcher writes `running` only while the exact waiting state it was
+# started for is still on disk, so a newer approval, a denial, `Stop`, or
+# `SessionEnd` always wins. A hard timeout bounds abandoned watchers.
+
+_APPROVAL_WATCH_TIMEOUT_SECONDS = 900
+_APPROVAL_WATCH_POLL_SECONDS = 0.3
+_TRANSCRIPT_OUTPUT_TYPES = ("custom_tool_call_output", "function_call_output")
+
+
+def _watch_dir() -> pathlib.Path:
+    path = install_root() / "watch"
+    path.mkdir(parents=True, exist_ok=True)
+    # A watcher unlinks its job file on start; anything this old was orphaned by
+    # a crash, so keep the directory from growing without bound.
+    cutoff = time.time() - 3600
+    for stale in path.glob("*.json"):
+        try:
+            if stale.stat().st_mtime < cutoff:
+                stale.unlink()
+        except OSError:
+            pass
+    return path
+
+
+def _state_fingerprint(session_id: str) -> tuple[str, str, str] | None:
+    """Return the identity of the current prompt on disk, if one exists."""
+    try:
+        data = json.loads(_state_file_path(session_id).read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return (
+        str(data.get("state") or ""),
+        str(data.get("message") or ""),
+        str(data.get("updated_at") or ""),
+    )
+
+
+def _tool_command(event: dict) -> str | None:
+    """Best-effort extraction of the shell command a PermissionRequest is about."""
+    for key in ("tool_input", "arguments", "tool_args", "args", "input"):
+        value = event.get(key)
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except Exception:
+                continue
+        if not isinstance(value, dict):
+            continue
+        for command_key in ("command", "cmd", "shell_command", "script"):
+            candidate = value.get(command_key)
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate
+    return None
+
+
+def _command_needles(command: str | None) -> list[str]:
+    """Return candidate slices of *command* that identify its process.
+
+    A direct execution shows the whole command in `ps` (`/bin/zsh -lc <command>`),
+    so the command prefix is the most reliable needle. When a persistent shell
+    parses the command instead, the child process only sees one segment (quotes
+    removed, assignments applied), so shell segments and long path-like tokens
+    are added as fallbacks.
+    """
+    if not command:
+        return []
+    needles: list[str] = []
+
+    def add(candidate: str) -> None:
+        candidate = candidate.strip()
+        if len(candidate) >= 6 and candidate not in needles:
+            needles.append(candidate[:48])
+
+    first_line = command.strip().splitlines()[0] if command.strip() else ""
+    if len(first_line) >= 12:
+        add(first_line)
+    for segment in re.split(r"&&|\|\||[;|\n]", command):
+        segment = re.sub(r"^(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)+", "", segment.strip())
+        line = segment.splitlines()[0] if segment else ""
+        if len(line) >= 6:
+            add(line)
+    tokens = re.findall(r"[A-Za-z0-9_./-]{10,}", command)
+    for token in sorted(tokens, key=len, reverse=True)[:2]:
+        add(token)
+    return needles[:5]
+
+
+def _ps_rows() -> list[tuple[int, int, str]]:
+    """Return (pid, ppid, command) for every process, or [] when `ps` fails."""
+    try:
+        result = subprocess.run(
+            ["/bin/ps", "-axww", "-o", "pid=,ppid=,command="],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception:
+        return []
+    if result.returncode != 0:
+        return []
+    rows = []
+    for line in result.stdout.splitlines():
+        parts = line.strip().split(None, 2)
+        if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit():
+            rows.append((int(parts[0]), int(parts[1]), parts[2]))
+    return rows
+
+
+def _matching_pids(rows: list[tuple[int, int, str]], needle: str | None) -> set[int]:
+    if not needle:
+        return set()
+    own = os.getpid()
+    return {
+        pid
+        for pid, _ppid, command in rows
+        if pid != own and needle in command and "codex_status_hook" not in command
+    }
+
+
+def _transcript_output_after(path: str | None, offset: int) -> tuple[bool, int]:
+    """Return (saw a tool output, new offset) for transcript bytes after offset.
+
+    Only complete JSONL lines are consumed, so a record that is still being
+    appended is picked up on the next poll instead of being skipped.
+    """
+    if not path:
+        return False, offset
+    try:
+        transcript = pathlib.Path(path)
+        size = transcript.stat().st_size
+        if size <= offset:
+            return False, offset
+        with transcript.open("rb") as handle:
+            handle.seek(offset)
+            chunk = handle.read(size - offset)
+    except Exception:
+        return False, offset
+    end = chunk.rfind(b"\n")
+    if end < 0:
+        return False, offset
+    chunk = chunk[: end + 1]
+    new_offset = offset + end + 1
+    saw_output = False
+    for raw in chunk.splitlines():
+        try:
+            record = json.loads(raw)
+        except Exception:
+            continue
+        payload = record.get("payload")
+        if isinstance(payload, dict) and payload.get("type") in _TRANSCRIPT_OUTPUT_TYPES:
+            saw_output = True
+    return saw_output, new_offset
+
+
+def _process_alive(pid: int | None) -> bool:
+    if not pid:
+        return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _clear_waiting(job: dict) -> None:
+    """Write `running` if the prompt this watcher was started for is still up."""
+    session_id = job["session_id"]
+    if _state_fingerprint(session_id) != tuple(job["fingerprint"]):
+        return
+    emit(
+        "running",
+        "Codex is working",
+        {
+            "session_id": session_id,
+            "turn_id": job.get("turn_id"),
+            "cwd": job.get("cwd"),
+            "transcript_path": job.get("transcript_path"),
+        },
+        is_streaming=False,
+    )
+
+
+def _spawn_approval_watcher(session_id: str, event: dict, command: str | None) -> None:
+    fingerprint = _state_fingerprint(session_id)
+    if fingerprint is None or fingerprint[0] != "waiting":
+        return
+    needles = _command_needles(command)
+    job = {
+        "session_id": session_id,
+        "turn_id": event.get("turn_id"),
+        "cwd": event.get("cwd") or os.getcwd(),
+        "transcript_path": event.get("transcript_path"),
+        "needles": needles,
+        "fingerprint": list(fingerprint),
+        "codex_pid": os.getppid(),
+        "started_at": time.time(),
+    }
+    if not needles and not job["transcript_path"]:
+        _log(f"approval_watch: nothing to observe for session={session_id}")
+        return
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "-", session_id).strip("-.")[:120] or "session"
+    job_path = _watch_dir() / f"{safe}-{time.time_ns()}.json"
+    try:
+        temporary = job_path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(job), encoding="utf-8")
+        os.replace(temporary, job_path)
+        subprocess.Popen(
+            [
+                sys.executable or "/usr/bin/python3",
+                str(pathlib.Path(__file__).resolve()),
+                "--watch-approval",
+                str(job_path),
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            close_fds=True,
+        )
+    except Exception as exc:
+        _log(f"approval_watch: spawn error {exc}")
+        job_path.unlink(missing_ok=True)
+        return
+    _log(
+        f"approval_watch: started session={session_id} "
+        f"needle_count={len(needles)} transcript={bool(job['transcript_path'])}"
+    )
+
+
+def _watch_approval(job_path: str) -> int:
+    """Wait for an approved tool to start (or finish) and clear the yellow light."""
+    path = pathlib.Path(job_path)
+    try:
+        job = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        _log(f"approval_watch: bad job {exc}")
+        path.unlink(missing_ok=True)
+        return 0
+    path.unlink(missing_ok=True)
+
+    session_id = str(job.get("session_id") or "")
+    fingerprint = tuple(job.get("fingerprint") or ())
+    needles = job.get("needles") or []
+    if not needles and job.get("needle"):
+        # Jobs written by earlier versions stored a single needle.
+        needles = [job["needle"]]
+    transcript = job.get("transcript_path")
+    deadline = time.monotonic() + _APPROVAL_WATCH_TIMEOUT_SECONDS
+    rows = _ps_rows()
+    baseline: set[int] = set()
+    for needle in needles:
+        baseline |= _matching_pids(rows, needle)
+    offset = 0
+    if transcript:
+        try:
+            offset = pathlib.Path(transcript).stat().st_size
+        except Exception:
+            offset = 0
+
+    while time.monotonic() < deadline:
+        time.sleep(_APPROVAL_WATCH_POLL_SECONDS)
+        if _state_fingerprint(session_id) != fingerprint:
+            _log(f"approval_watch: stop session={session_id} (state changed)")
+            return 0
+        if not _process_alive(job.get("codex_pid")):
+            _log(f"approval_watch: stop session={session_id} (codex exited)")
+            return 0
+        if needles:
+            rows = _ps_rows()
+            started: set[int] = set()
+            for needle in needles:
+                started |= _matching_pids(rows, needle)
+            started -= baseline
+            if started:
+                _log(f"approval_watch: command started session={session_id} pids={sorted(started)}")
+                _clear_waiting(job)
+                return 0
+        if transcript:
+            saw_output, offset = _transcript_output_after(transcript, offset)
+            if saw_output:
+                _log(f"approval_watch: tool output session={session_id}")
+                _clear_waiting(job)
+                return 0
+    _log(f"approval_watch: timeout session={session_id}")
+    return 0
+
+
 def main() -> int:
     try:
         event = json.load(sys.stdin)
@@ -415,6 +719,10 @@ def main() -> int:
     elif name == "PermissionRequest":
         _awaiting_input.add(session_id)
         set_state(session_id, "waiting", f"Approval needed: {tool}", event)
+        # Codex has no hook for "the user answered"; watch the command start /
+        # tool output instead so the yellow light clears as soon as the
+        # approved work begins rather than at the next Codex event.
+        _spawn_approval_watcher(session_id, event, _tool_command(event))
     elif name == "PreToolUse" and str(tool) in {"request_user_input", "RequestUserInput"}:
         header = _question_header(event)
         _awaiting_input.add(session_id)
@@ -449,4 +757,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    if len(sys.argv) >= 3 and sys.argv[1] == "--watch-approval":
+        raise SystemExit(_watch_approval(sys.argv[2]))
     raise SystemExit(main())

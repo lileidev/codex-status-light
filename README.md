@@ -79,6 +79,12 @@ After installation, restart the agent and use `/hooks` (Claude) or `/hooks`
 (Codex) to review and trust the new command hooks. Hooks automatically track
 turn start, permission requests, tool errors, and turn completion.
 
+Codex has no hook for the answer to a permission prompt itself. When the prompt
+appears the hook therefore starts a small background watcher: it switches the
+light back to blue as soon as the approved command starts running (or, for
+approvals without a shell command such as `write_stdin`, as soon as the tool
+output appears), instead of waiting for the next Codex event.
+
 ### DeepSeek Harness (DSH)
 
 DSH has no command hook like Codex/Claude, so instead this project watches DSH's

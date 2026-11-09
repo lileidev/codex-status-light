@@ -1,6 +1,8 @@
 import importlib.util
+import json
 import pathlib
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
@@ -132,3 +134,180 @@ class CodexHookSessionIdTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         clear_session.assert_called_once_with("01a0c7ea-757d-7e21-91f6-a5de84b8e794")
         set_state.assert_not_called()
+
+
+class CodexApprovalWatcherTests(unittest.TestCase):
+    """The watcher bridges the missing "user answered the approval" hook."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = pathlib.Path(self._tmp.name)
+
+    def _write_status(self, message="Approval needed: Bash"):
+        payload = {
+            "state": "waiting",
+            "message": message,
+            "updated_at": "2026-11-09T00:00:00Z",
+            "source": "codex",
+            "is_streaming": False,
+        }
+        (self.tmp / "sess-1.json").write_text(json.dumps(payload), encoding="utf-8")
+        return payload
+
+    def _write_job(self, fingerprint, needles=None, transcript_path=None):
+        job = {
+            "session_id": "sess-1",
+            "turn_id": "turn-1",
+            "cwd": "/tmp",
+            "transcript_path": transcript_path,
+            "needles": needles or [],
+            "fingerprint": list(fingerprint),
+            "codex_pid": module.os.getpid(),
+        }
+        path = self.tmp / "job.json"
+        path.write_text(json.dumps(job), encoding="utf-8")
+        return path
+
+    def _fingerprint(self, status):
+        return [status["state"], status["message"], status["updated_at"]]
+
+    def test_command_needles_include_prefix_segments_and_tokens(self):
+        command = (
+            "PYTHONPATH=python/perfopt/src /very/long/venv/bin/python run.py "
+            "&& cat /tmp/output.log"
+        )
+        needles = module._command_needles(command)
+        self.assertIn(command[:48], needles)
+        self.assertIn("/very/long/venv/bin/python run.py", needles)
+        self.assertIn("cat /tmp/output.log", needles)
+
+    def test_command_needles_split_shell_operators(self):
+        needles = module._command_needles("sleep 4; : marker")
+        self.assertIn("sleep 4", needles)
+        self.assertIn(": marker", needles)
+
+    def test_command_needles_ignore_empty_commands(self):
+        self.assertEqual(module._command_needles(None), [])
+        self.assertEqual(module._command_needles("   "), [])
+
+    def test_tool_command_reads_json_string_and_command_key(self):
+        event = {"tool_input": json.dumps({"command": "python3 - <<'PY'\nprint(1)\nPY"})}
+        self.assertEqual(module._tool_command(event), "python3 - <<'PY'\nprint(1)\nPY")
+        self.assertIsNone(module._tool_command({"tool_input": {"session_id": 3}}))
+
+    def test_matching_pids_skips_hook_processes(self):
+        rows = [
+            (101, 1, "/bin/zsh -lc python3 - <<'PY'"),
+            (102, 101, "/usr/bin/python3 /x/hooks/codex_status_hook.py --watch-approval"),
+            (103, 1, "/usr/bin/python3 /x/hooks/codex_status_hook.py"),
+        ]
+        self.assertEqual(module._matching_pids(rows, "python3"), {101})
+
+    def test_transcript_output_after_reads_only_complete_lines(self):
+        path = self.tmp / "rollout.jsonl"
+        path.write_text("", encoding="utf-8")
+        offset = path.stat().st_size
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write('{"payload": {"type": "custom_tool_call_output"}}')
+        saw, new_offset = module._transcript_output_after(str(path), offset)
+        self.assertFalse(saw)
+        self.assertEqual(new_offset, offset)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write("\n")
+        saw, new_offset = module._transcript_output_after(str(path), offset)
+        self.assertTrue(saw)
+        self.assertGreater(new_offset, offset)
+
+    def test_transcript_output_after_ignores_non_output_records(self):
+        path = self.tmp / "rollout.jsonl"
+        path.write_text('{"payload": {"type": "custom_tool_call"}}\n', encoding="utf-8")
+        saw, _ = module._transcript_output_after(str(path), 0)
+        self.assertFalse(saw)
+
+    def test_spawn_approval_watcher_writes_job_and_starts_process(self):
+        with mock.patch.object(module, "_state_dir", return_value=self.tmp):
+            status = self._write_status()
+            with mock.patch.object(module, "_watch_dir", return_value=self.tmp), \
+                 mock.patch.object(module.subprocess, "Popen") as popen:
+                module._spawn_approval_watcher(
+                    "sess-1",
+                    {"turn_id": "turn-1", "cwd": "/tmp",
+                     "transcript_path": "/tmp/rollout.jsonl"},
+                    "python3 /Users/x/run_profiling_check.py",
+                )
+        popen.assert_called_once()
+        self.assertIn("--watch-approval", popen.call_args.args[0])
+        jobs = list(self.tmp.glob("sess-1-*.json"))
+        self.assertEqual(len(jobs), 1)
+        job = json.loads(jobs[0].read_text(encoding="utf-8"))
+        self.assertIn("python3 /Users/x/run_profiling_check.py", job["needles"])
+        self.assertEqual(job["fingerprint"], self._fingerprint(status))
+
+    def test_watch_approval_clears_when_command_starts(self):
+        with mock.patch.object(module, "_state_dir", return_value=self.tmp):
+            status = self._write_status()
+            job_path = self._write_job(
+                self._fingerprint(status), needles=["run_profiling_check.py"]
+            )
+            baseline = [(10, 1, "/bin/zsh -lc something-else")]
+            started = baseline + [
+                (11, 1, "/bin/zsh -lc python3 run_profiling_check.py")
+            ]
+            with mock.patch.object(
+                module, "_ps_rows", side_effect=[baseline, started, started]
+            ), mock.patch.object(module.time, "sleep"), \
+                 mock.patch.object(module, "emit") as emit:
+                module._watch_approval(str(job_path))
+        emit.assert_called_once()
+        self.assertEqual(emit.call_args.args[0], "running")
+        self.assertFalse(job_path.exists())
+
+    def test_watch_approval_stops_when_the_prompt_is_replaced(self):
+        with mock.patch.object(module, "_state_dir", return_value=self.tmp):
+            status = self._write_status()
+            job_path = self._write_job(
+                self._fingerprint(status), needles=["run_profiling_check.py"]
+            )
+            changed = ("running", "Codex is working", "later")
+            with mock.patch.object(
+                module, "_ps_rows", return_value=[(10, 1, "other")]
+            ), mock.patch.object(
+                module, "_state_fingerprint",
+                side_effect=[self._fingerprint(status), changed],
+            ), mock.patch.object(module.time, "sleep"), \
+                 mock.patch.object(module, "emit") as emit:
+                module._watch_approval(str(job_path))
+        emit.assert_not_called()
+
+    def test_watch_approval_clears_on_tool_output_without_a_process(self):
+        with mock.patch.object(module, "_state_dir", return_value=self.tmp):
+            status = self._write_status(message="Approval needed: write_stdin")
+            job_path = self._write_job(
+                self._fingerprint(status), transcript_path="/tmp/rollout.jsonl"
+            )
+            with mock.patch.object(
+                module, "_transcript_output_after", side_effect=[(True, 10)]
+            ), mock.patch.object(module.time, "sleep"), \
+                 mock.patch.object(module, "emit") as emit:
+                module._watch_approval(str(job_path))
+        emit.assert_called_once()
+        self.assertEqual(emit.call_args.args[0], "running")
+
+    def test_watch_approval_also_tails_the_transcript_with_needles(self):
+        with mock.patch.object(module, "_state_dir", return_value=self.tmp):
+            status = self._write_status()
+            job_path = self._write_job(
+                self._fingerprint(status),
+                needles=["run_profiling_check.py"],
+                transcript_path="/tmp/rollout.jsonl",
+            )
+            with mock.patch.object(
+                module, "_ps_rows", return_value=[(10, 1, "other")]
+            ), mock.patch.object(
+                module, "_transcript_output_after", side_effect=[(True, 10)]
+            ), mock.patch.object(module.time, "sleep"), \
+                 mock.patch.object(module, "emit") as emit:
+                module._watch_approval(str(job_path))
+        emit.assert_called_once()
+        self.assertEqual(emit.call_args.args[0], "running")
