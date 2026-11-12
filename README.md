@@ -85,6 +85,11 @@ light back to blue as soon as the approved command starts running (or, for
 approvals without a shell command such as `write_stdin`, as soon as the tool
 output appears), instead of waiting for the next Codex event.
 
+Approvals that Codex resolves itself — auto-review (`approvals_reviewer =
+"auto_review"`) or `approval_policy = "never"` — never show a prompt. The hook
+reads the session's recorded thread settings and keeps the light blue for those
+instead of flashing yellow.
+
 ### DeepSeek Harness (DSH)
 
 DSH has no command hook like Codex/Claude, so instead this project watches DSH's

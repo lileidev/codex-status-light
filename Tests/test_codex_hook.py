@@ -1,4 +1,5 @@
 import importlib.util
+import io
 import json
 import pathlib
 import sys
@@ -311,3 +312,95 @@ class CodexApprovalWatcherTests(unittest.TestCase):
                 module._watch_approval(str(job_path))
         emit.assert_called_once()
         self.assertEqual(emit.call_args.args[0], "running")
+
+
+class CodexAutoReviewTests(unittest.TestCase):
+    """Auto-review approvals never reach the user, so they must not turn yellow."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = pathlib.Path(self._tmp.name)
+        root_patch = mock.patch.object(module, "install_root", return_value=self.tmp)
+        root_patch.start()
+        self.addCleanup(root_patch.stop)
+
+    def _transcript(self, settings):
+        path = self.tmp / "rollout.jsonl"
+        path.write_text(
+            json.dumps({"payload": {"type": "thread_settings_applied",
+                                    "thread_settings": settings}}) + "\n",
+            encoding="utf-8",
+        )
+        return str(path)
+
+    def _run(self, event, current="running"):
+        with mock.patch("codex_status_hook.sys.stdin", io.StringIO(json.dumps(event))), \
+             mock.patch("codex_status_hook._parent_process_name", return_value="codex"), \
+             mock.patch("codex_status_hook.ensure_app_running"), \
+             mock.patch("codex_status_hook.current_state", return_value=current), \
+             mock.patch("codex_status_hook.set_state") as set_state, \
+             mock.patch("codex_status_hook._spawn_approval_watcher") as spawn:
+            rc = module.main()
+        return rc, set_state, spawn
+
+    def test_latest_thread_settings_returns_the_newest_record(self):
+        path = self._transcript({"approval_policy": "on-request",
+                                 "approvals_reviewer": "user"})
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps({
+                "payload": {"type": "thread_settings_applied",
+                            "thread_settings": {"approval_policy": "never",
+                                                "approvals_reviewer": "auto_review"}}
+            }) + "\n")
+        settings = module._latest_thread_settings(path)
+        self.assertEqual(settings["approvals_reviewer"], "auto_review")
+
+    def test_latest_thread_settings_handles_missing_file(self):
+        self.assertEqual(module._latest_thread_settings(None), {})
+        self.assertEqual(module._latest_thread_settings(str(self.tmp / "missing")), {})
+
+    def test_auto_reviewed_from_permission_mode(self):
+        self.assertTrue(module._auto_reviewed({"permission_mode": "never"}))
+        self.assertTrue(module._auto_reviewed({"permission_mode": "auto_review"}))
+        self.assertFalse(module._auto_reviewed({"permission_mode": "on-request"}))
+
+    def test_auto_reviewed_from_transcript_reviewer(self):
+        transcript = self._transcript({"approval_policy": "on-request",
+                                       "approvals_reviewer": "auto_review"})
+        self.assertTrue(module._auto_reviewed({"transcript_path": transcript}))
+
+    def test_auto_reviewed_false_for_user_reviewer(self):
+        transcript = self._transcript({"approval_policy": "on-request",
+                                       "approvals_reviewer": "user"})
+        self.assertFalse(module._auto_reviewed({"transcript_path": transcript}))
+
+    def test_main_auto_review_does_not_wait_or_spawn(self):
+        event = {"hook_event_name": "PermissionRequest", "session_id": "sess-auto",
+                 "tool_name": "Bash", "permission_mode": "never",
+                 "tool_input": {"command": "git status"}}
+        rc, set_state, spawn = self._run(event)
+        self.assertEqual(rc, 0)
+        set_state.assert_not_called()
+        spawn.assert_not_called()
+        self.assertNotIn("sess-auto", module._awaiting_input)
+
+    def test_main_auto_review_clears_a_stale_waiting_state(self):
+        event = {"hook_event_name": "PermissionRequest", "session_id": "sess-auto2",
+                 "tool_name": "Bash", "permission_mode": "never",
+                 "tool_input": {"command": "git status"}}
+        rc, set_state, spawn = self._run(event, current="waiting")
+        self.assertEqual(rc, 0)
+        set_state.assert_called_once()
+        self.assertEqual(set_state.call_args.args[1], "running")
+        spawn.assert_not_called()
+
+    def test_main_user_review_still_waits_and_spawns(self):
+        event = {"hook_event_name": "PermissionRequest", "session_id": "sess-user",
+                 "tool_name": "Bash", "permission_mode": "on-request",
+                 "tool_input": {"command": "git status"}, "cwd": "/tmp"}
+        rc, set_state, spawn = self._run(event)
+        self.assertEqual(rc, 0)
+        set_state.assert_called_once()
+        self.assertEqual(set_state.call_args.args[1], "waiting")
+        spawn.assert_called_once()

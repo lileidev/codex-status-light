@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
 import os
 import pathlib
@@ -442,6 +443,117 @@ def _tool_command(event: dict) -> str | None:
     return None
 
 
+# Reviewers that resolve approvals without showing the user a prompt. Codex
+# still fires `PermissionRequest` for them, so the hook must not paint yellow.
+_AUTO_APPROVAL_REVIEWERS = {"auto_review", "auto-review", "auto", "guardian"}
+_THREAD_SETTINGS_CACHE_TTL_SECONDS = 60
+_THREAD_SETTINGS_SCAN_BLOCK_BYTES = 1024 * 1024
+_THREAD_SETTINGS_SCAN_OVERLAP_BYTES = 64 * 1024
+
+
+def _settings_cache_path(transcript: pathlib.Path) -> pathlib.Path:
+    cache_dir = install_root() / "settings-cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha1(str(transcript).encode("utf-8")).hexdigest()[:16]
+    return cache_dir / f"{digest}.json"
+
+
+def _scan_thread_settings(transcript: pathlib.Path) -> dict:
+    """Find the newest usable thread settings by scanning the file backwards."""
+    try:
+        size = transcript.stat().st_size
+    except Exception:
+        return {}
+    position = size
+    while position > 0:
+        start = max(0, position - _THREAD_SETTINGS_SCAN_BLOCK_BYTES)
+        try:
+            with transcript.open("rb") as handle:
+                handle.seek(start)
+                # Overlap into the already-scanned region so a record that
+                # straddles the block boundary is still parsed in full.
+                chunk = handle.read(
+                    position - start + _THREAD_SETTINGS_SCAN_OVERLAP_BYTES
+                )
+        except Exception:
+            return {}
+        for raw in reversed(chunk.splitlines()):
+            try:
+                record = json.loads(raw)
+            except Exception:
+                continue
+            payload = record.get("payload")
+            if not isinstance(payload, dict) or payload.get("type") != "thread_settings_applied":
+                continue
+            settings = payload.get("thread_settings")
+            if isinstance(settings, dict) and (
+                settings.get("approval_policy") or settings.get("approvals_reviewer")
+            ):
+                return settings
+        position = start
+    return {}
+
+
+def _latest_thread_settings(transcript_path: str | None) -> dict:
+    """Return the newest thread settings recorded in a rollout transcript.
+
+    Codex appends ``thread_settings_applied`` event messages whenever the
+    approval policy or reviewer changes. A long turn can push the last such
+    record megabytes away from EOF, so we cache the result for a short window
+    instead of re-reading the transcript on every approval.
+    """
+    if not transcript_path:
+        return {}
+    transcript = pathlib.Path(transcript_path)
+    cache_path: pathlib.Path | None = None
+    try:
+        cache_path = _settings_cache_path(transcript)
+    except Exception:
+        cache_path = None
+    if cache_path is not None:
+        try:
+            cached = json.loads(cache_path.read_text(encoding="utf-8"))
+            if (
+                cached.get("path") == str(transcript)
+                and isinstance(cached.get("settings"), dict)
+                and time.time() - float(cached.get("read_at") or 0)
+                < _THREAD_SETTINGS_CACHE_TTL_SECONDS
+            ):
+                return cached["settings"]
+        except Exception:
+            pass
+    settings = _scan_thread_settings(transcript)
+    if cache_path is None:
+        return settings
+    try:
+        temporary = cache_path.with_suffix(".tmp")
+        temporary.write_text(
+            json.dumps(
+                {
+                    "path": str(transcript),
+                    "read_at": time.time(),
+                    "settings": settings,
+                }
+            ),
+            encoding="utf-8",
+        )
+        os.replace(temporary, cache_path)
+    except Exception:
+        pass
+    return settings
+
+
+def _auto_reviewed(event: dict) -> bool:
+    """True when Codex resolves this approval itself instead of asking the user."""
+    mode = str(event.get("permission_mode") or "").strip().lower()
+    if mode in {"never", "auto_review", "auto-review", "bypass"}:
+        return True
+    settings = _latest_thread_settings(event.get("transcript_path"))
+    reviewer = str(settings.get("approvals_reviewer") or "").strip().lower()
+    policy = str(settings.get("approval_policy") or "").strip().lower()
+    return policy == "never" or reviewer in _AUTO_APPROVAL_REVIEWERS
+
+
 def _command_needles(command: str | None) -> list[str]:
     """Return candidate slices of *command* that identify its process.
 
@@ -717,12 +829,25 @@ def main() -> int:
         # the running state as streaming until the first PostToolUse arrives.
         set_state(session_id, "running", "Codex is working", event, is_streaming=True)
     elif name == "PermissionRequest":
-        _awaiting_input.add(session_id)
-        set_state(session_id, "waiting", f"Approval needed: {tool}", event)
-        # Codex has no hook for "the user answered"; watch the command start /
-        # tool output instead so the yellow light clears as soon as the
-        # approved work begins rather than at the next Codex event.
-        _spawn_approval_watcher(session_id, event, _tool_command(event))
+        auto_reviewed = _auto_reviewed(event)
+        _log(
+            f"PermissionRequest: tool={tool} "
+            f"mode={event.get('permission_mode')} auto_reviewed={auto_reviewed}"
+        )
+        if auto_reviewed:
+            # No prompt is shown to the user: Codex's reviewer model decides.
+            # Keep the light blue and only clear a stale yellow from an earlier
+            # prompt, so auto-review requests no longer flash the panel.
+            _awaiting_input.discard(session_id)
+            if current_state(session_id) == "waiting":
+                set_state(session_id, "running", "Codex is working", event, is_streaming=False)
+        else:
+            _awaiting_input.add(session_id)
+            set_state(session_id, "waiting", f"Approval needed: {tool}", event)
+            # Codex has no hook for "the user answered"; watch the command start /
+            # tool output instead so the yellow light clears as soon as the
+            # approved work begins rather than at the next Codex event.
+            _spawn_approval_watcher(session_id, event, _tool_command(event))
     elif name == "PreToolUse" and str(tool) in {"request_user_input", "RequestUserInput"}:
         header = _question_header(event)
         _awaiting_input.add(session_id)

@@ -302,6 +302,26 @@ of a *denial* — there is still no event until the next Codex action, so Option
 useful complement. The app-server `thread/status/changed` route (Option 3) is still the
 only way to observe approvals and denials exactly.
 
+### Auto-review false yellow (2026-11-12)
+
+Symptom: the light turned yellow for a few seconds **without any approval prompt**, then
+went blue again. The hook log showed a real `PermissionRequest`, but the session's
+`thread_settings_applied` record had `approval_policy = "on-request"` (or `"never"`) with
+`approvals_reviewer = "auto_review"`; during the yellow window the rollout contained the
+reviewer model's decision (`model: codex-auto-review`,
+`{"outcome":"allow", ...}`). No UI was shown to the user.
+
+Codex fires `PermissionRequest` for reviewer-resolved approvals too. The hook painted
+yellow, then the command watcher cleared it at execution start — a flash. The panel's
+re-open-on-waiting rule made a hidden panel appear for it as well.
+
+Fix: `_auto_reviewed()` skips the waiting write and watcher when `permission_mode` is
+`never`/`auto_review`, or when the newest `thread_settings_applied` in the session
+transcript has `approvals_reviewer` in `{auto_review, auto, guardian}` or
+`approval_policy = "never"`. The settings are cached for 60 s and the transcript is
+scanned backwards in 1 MiB blocks, so a long turn cannot hide the record. Tests:
+`CodexAutoReviewTests` (8 cases) plus an integration run against a real parent rollout.
+
 ## Reproduction
 
 The trace can be reproduced from the hook log:
